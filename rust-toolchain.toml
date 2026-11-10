@@ -1,0 +1,5 @@
+# Pinned stable toolchain (M-01, I-10). Change only with a recorded decision in README.md.
+# Bevy 0.20.1 requires Rust >= 1.97.1.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]

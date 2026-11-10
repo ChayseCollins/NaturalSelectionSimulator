@@ -1,0 +1,13 @@
+[package]
+name = "sim"
+description = "Simulation library: every rule lives here. No graphics, UI, windowing, file I/O or clock."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# I-01: no graphics, UI or windowing crate may ever be added here.
+[dependencies]
+rand_chacha.workspace = true
+rand_core.workspace = true
+libm.workspace = true

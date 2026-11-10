@@ -1,0 +1,16 @@
+[package]
+name = "app"
+description = "Desktop application (Bevy + egui) for the Natural Selection Simulator."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# egui is listed directly so the pinned version in [workspace.dependencies] is enforced;
+# bevy_egui and egui_plot must resolve to this same single egui version.
+[dependencies]
+sim.workspace = true
+bevy.workspace = true
+bevy_egui.workspace = true
+egui.workspace = true
+egui_plot.workspace = true

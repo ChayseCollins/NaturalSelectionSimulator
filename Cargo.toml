@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["sim", "app", "headless"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+# Exact versions (I-10). No upgrade without a recorded decision in README.md.
+# bevy_egui 0.43.1 requires bevy ^0.20 and egui ^0.36; egui_plot 0.37.0 requires egui ^0.36.
+# All of these are for `app` only: `sim` and `headless` must never depend on them (I-01, T-HL-6).
+[workspace.dependencies]
+sim = { path = "sim" }
+# Portable, seedable RNG for `sim` (SCOPE 7.1). Default features off: no std, no OS entropy.
+rand_chacha = { version = "=0.10.0", default-features = false }
+rand_core = "=0.10.1"
+# Transcendental functions in `sim` (SCOPE 6.10). Default `arch` feature off: portable software implementations.
+libm = { version = "=0.2.16", default-features = false }
+bevy = { version = "=0.20.1", default-features = false, features = ["2d"] }
+bevy_egui = "=0.43.1"
+egui = "=0.36.2"
+egui_plot = "=0.37.0"

@@ -1,0 +1,33 @@
+# Rust / Cargo build output (Cargo.lock is committed: the workspace builds binaries)
+/target/
+**/*.rs.bk
+*.pdb
+
+# Bevy
+**/imported_assets/
+*.profraw
+trace-*.json
+
+# Visual Studio Code (keep shared settings if added deliberately)
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+.history/
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# WSL2 (Windows alternate data streams copied across the boundary)
+*:Zone.Identifier
+
+# Editors and OS
+*.swp
+*~
+.DS_Store
