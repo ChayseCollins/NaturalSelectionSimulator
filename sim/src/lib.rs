@@ -17,6 +17,7 @@ pub mod energy;
 mod food;
 mod hash;
 pub mod limits;
+mod metrics;
 mod organisms;
 mod rng;
 pub mod traits;
@@ -26,6 +27,7 @@ pub use config::{
     ValidationError, WorldConfig,
 };
 pub use food::FoodGrid;
+pub use metrics::SummaryMetrics;
 pub use organisms::Organisms;
 
 use hash::Fnv1a64;
@@ -50,6 +52,8 @@ pub struct Simulation {
     next_id: u64,
     /// Cumulative prey removed by starvation.
     starvation_deaths: u64,
+    /// Cumulative food removed from cells by feeding, in food units (not energy).
+    food_consumed: f64,
     /// Scratch list of storage indices to remove this tick, in ascending order. Always
     /// empty between ticks, so it is not simulation state and is not hashed.
     pending_removals: Vec<usize>,
@@ -74,6 +78,7 @@ impl Simulation {
             food: FoodGrid::new(&config.world, &config.food),
             next_id: 0,
             starvation_deaths: 0,
+            food_consumed: 0.0,
             pending_removals: Vec::new(),
             effort: Vec::new(),
         };
@@ -174,6 +179,31 @@ impl Simulation {
         self.starvation_deaths
     }
 
+    /// Cumulative food removed from cells by feeding since tick 0, in food units.
+    pub fn cumulative_food_consumed(&self) -> f64 {
+        self.food_consumed
+    }
+
+    /// Summary of the current state for headless output and CSV export (M-17, M-21).
+    /// Reads state only: it changes nothing and draws no random numbers. Averages are
+    /// `None` when there are no prey; sums use `f64` in storage order.
+    pub fn summary_metrics(&self) -> SummaryMetrics {
+        let o = &self.organisms;
+        SummaryMetrics {
+            tick: self.tick,
+            sim_seconds: self.sim_seconds(),
+            prey_population: o.len(),
+            avg_speed: metrics::mean(&o.speed),
+            avg_size: metrics::mean(&o.size),
+            avg_sense: metrics::mean(&o.sense),
+            avg_energy: metrics::mean(&o.energy),
+            total_food: metrics::sum(self.food.amounts()),
+            cumulative_food_consumed: self.food_consumed,
+            cumulative_starvation_deaths: self.starvation_deaths,
+            state_hash: self.state_hash(),
+        }
+    }
+
     /// Simulated seconds elapsed, for display only: computed as `tick / ticks_per_second`
     /// in `f64` each call, never accumulated. Exact while `tick` is below 2^53.
     pub fn sim_seconds(&self) -> f64 {
@@ -190,7 +220,7 @@ impl Simulation {
     /// 3. each organism column in storage-index order, one column after another: ID
     ///    (`u64`), x, y, energy (`f32`), age, generation (`u32`), speed, size, sense,
     ///    heading (`f32`), target (`u32`)
-    /// 4. cumulative starvation deaths (`u64`)
+    /// 4. cumulative starvation deaths (`u64`), cumulative food consumed (`f64`)
     /// 5. food grid width and height (`u32`), then every cell's food (`f32`) in index order
     /// 6. stream word position of the terrain, initial-population, behavior and mutation
     ///    generators, in that order (`u128` each)
@@ -223,6 +253,7 @@ impl Simulation {
         hasher.write_u32_slice(&o.target);
 
         hasher.write_u64(self.starvation_deaths);
+        hasher.write_f64(self.food_consumed);
 
         hasher.write_u32(self.food.width());
         hasher.write_u32(self.food.height());
@@ -332,7 +363,12 @@ impl Simulation {
                 food_config.energy_per_unit,
             );
             if eaten > 0.0 {
-                self.food.food[cell] -= eaten;
+                let before = self.food.food[cell];
+                let after = before - eaten;
+                self.food.food[cell] = after;
+                // Count what actually left the cell; the difference of two f32 values is
+                // exact in f64.
+                self.food_consumed += f64::from(before) - f64::from(after);
                 o.energy[i] = (o.energy[i] + eaten * food_config.energy_per_unit).min(capacity);
             }
         }
@@ -446,6 +482,9 @@ impl Simulation {
             if !amount.is_finite() || amount < 0.0 || amount > cap {
                 return Err(format!("cell {index} holds {amount} outside [0, {cap}]"));
             }
+        }
+        if !self.food_consumed.is_finite() || self.food_consumed < 0.0 {
+            return Err(format!("food consumed is {}", self.food_consumed));
         }
         if !self.pending_removals.is_empty() {
             return Err("pending removals left between ticks".into());
@@ -834,6 +873,106 @@ mod tests {
         assert_eq!(s.food.amounts()[cell], 0.0);
     }
 
+    #[test]
+    fn food_consumed_counts_exactly_the_food_removed() {
+        let mut s = feeding_sim(2);
+        place(&mut s, 0, 3.0, 3.0);
+        place(&mut s, 1, 3.5, 3.5);
+        let cell = s.food.cell_at(3.0, 3.0);
+        s.food.food[cell] = 0.375;
+        s.feed();
+        assert_eq!(
+            s.cumulative_food_consumed(),
+            0.375,
+            "0.25 + 0.125, in food units"
+        );
+        s.feed();
+        assert_eq!(
+            s.cumulative_food_consumed(),
+            0.375,
+            "an empty cell adds nothing"
+        );
+
+        s.food.food[cell] = 1.0;
+        s.organisms.energy[0] = 10.0;
+        s.organisms.energy[1] = 10.0;
+        s.feed();
+        assert_eq!(s.cumulative_food_consumed(), 0.375, "full prey eat nothing");
+        assert_eq!(s.food.amounts()[cell], 1.0);
+    }
+
+    #[test]
+    fn food_consumed_matches_the_food_that_left_the_grid() {
+        let mut config = uniform_config(200);
+        config.food.regrowth_per_tick = 0.0;
+        config.world.width = 64.0;
+        config.world.height = 64.0;
+        let mut s = sim(&config, 1);
+        let start = metrics::sum(s.food().amounts());
+        step_checked(&mut s, 300);
+        let removed = start - metrics::sum(s.food().amounts());
+        assert!(s.cumulative_food_consumed() > 0.0);
+        assert!(
+            (s.cumulative_food_consumed() - removed).abs() < 1e-6,
+            "{} vs {removed}",
+            s.cumulative_food_consumed()
+        );
+    }
+
+    // ----- Summary metrics (M-17, M-21) -----
+
+    #[test]
+    fn summary_metrics_report_the_current_state() {
+        let mut s = sim(&uniform_config(10), 1);
+        let first = s.summary_metrics();
+        assert_eq!(first.tick, 0);
+        assert_eq!(first.sim_seconds, 0.0);
+        assert_eq!(first.prey_population, 10);
+        assert_eq!(first.avg_speed, Some(1.0), "zero spread: exactly the mean");
+        assert_eq!(first.avg_size, Some(1.0));
+        assert_eq!(first.avg_sense, Some(10.0));
+        assert_eq!(first.avg_energy, Some(5.0));
+        assert_eq!(first.total_food, 65_536.0, "256 × 256 full cells");
+        assert_eq!(first.cumulative_food_consumed, 0.0);
+        assert_eq!(first.cumulative_starvation_deaths, 0);
+        assert_eq!(first.state_hash, s.state_hash());
+
+        step_checked(&mut s, 45);
+        let later = s.summary_metrics();
+        assert_eq!(later.tick, 45);
+        assert_eq!(later.sim_seconds, 1.5);
+        assert_eq!(later.cumulative_food_consumed, s.cumulative_food_consumed());
+        assert!(later.cumulative_food_consumed > 0.0);
+    }
+
+    #[test]
+    fn summary_metrics_without_prey_have_no_averages() {
+        let s = sim(&uniform_config(0), 1);
+        let m = s.summary_metrics();
+        assert_eq!(m.prey_population, 0);
+        assert_eq!(
+            (m.avg_speed, m.avg_size, m.avg_sense, m.avg_energy),
+            (None, None, None, None)
+        );
+        assert!(m.total_food.is_finite() && m.sim_seconds.is_finite());
+    }
+
+    /// T-CSV-5 (sim part): taking a summary changes no state, hash or random-domain
+    /// position, however often it is taken.
+    #[test]
+    fn summary_metrics_are_pure_observations() {
+        let mut s = default_sim();
+        step_checked(&mut s, 20);
+        let before = s.clone();
+        let positions = s.rng.word_positions();
+        let first = s.summary_metrics();
+        let second = s.summary_metrics();
+        assert_eq!(first, second);
+        assert_eq!(s, before);
+        assert_eq!(s.rng.word_positions(), positions);
+        assert_eq!(s.state_hash(), before.state_hash());
+    }
+
     // ----- Seeking and movement (Week 1 part of M-09) -----
 
     #[test]
@@ -1206,7 +1345,7 @@ mod tests {
         let mut base = sim(&uniform_config(3), 1);
         base.step_n(2);
         let base_hash = base.state_hash();
-        let mutations: [Mutation; 15] = [
+        let mutations: [Mutation; 16] = [
             ("id", |s| s.organisms.id[1] = 99),
             ("x", |s| s.organisms.x[1] += 0.5),
             ("y", |s| s.organisms.y[1] += 0.5),
@@ -1220,6 +1359,7 @@ mod tests {
             ("target", |s| s.organisms.target[1] ^= 1),
             ("next_id", |s| s.next_id += 1),
             ("starvation_deaths", |s| s.starvation_deaths += 1),
+            ("food_consumed", |s| s.food_consumed += 0.125),
             ("removal", |s| s.organisms.swap_remove(2)),
             ("food", |s| s.food.food[17] -= 0.125),
         ];

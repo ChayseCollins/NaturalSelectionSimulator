@@ -9,3 +9,4 @@ publish.workspace = true
 # Must never depend on Bevy or egui (T-HL-6).
 [dependencies]
 sim.workspace = true
+clap.workspace = true

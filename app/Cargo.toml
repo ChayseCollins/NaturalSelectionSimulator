@@ -14,3 +14,8 @@ bevy.workspace = true
 bevy_egui.workspace = true
 egui.workspace = true
 egui_plot.workspace = true
+
+# T-DET-4 compares the stepping driver with the `headless run` path. Test-only, so
+# `headless` itself never depends on `app` or Bevy.
+[dev-dependencies]
+headless.workspace = true

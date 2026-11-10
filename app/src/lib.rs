@@ -4,3 +4,6 @@
 //! here so its unit tests need no renderer, input system or wall clock.
 
 pub mod driver;
+
+#[cfg(test)]
+mod t_det_4;

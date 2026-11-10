@@ -4,11 +4,11 @@ A Rust desktop application that simulates natural selection among prey and preda
 
 ## Current status
 
-M-01 (workspace foundation) is complete. M-02 (deterministic core) is complete for Week 1 except one pending check:
+M-01 (workspace foundation) is complete. M-02 (deterministic core) is complete for Week 1:
 
 - `sim`: configuration, four random domains, fixed tick pipeline, state hash (T-DET-1, T-DET-2, T-RNG-1).
-- `app`: pure stepping driver in `app/src/driver.rs` (T-FT-1 to T-FT-3, and the driver portion of T-DET-4), not yet connected to a Bevy window.
-- **Pending:** the T-DET-4 comparison of the app driver against `headless run --ticks 1000`, blocked on M-17.
+- `app`: pure stepping driver in `app/src/driver.rs` (T-FT-1 to T-FT-3), not yet connected to a Bevy window.
+- **T-DET-4 is complete:** two driver frame sequences (one capped with a backlog), the `headless run` path, the `headless` binary and direct stepping all reach the same state at tick 1,000.
 - **Week 2 (SCOPE 6.10):** the state hash must keep growing to cover all state as later columns arrive; T-DET-1 and T-DET-2 are then rerun.
 
 M-03 (prey organisms) is complete for prey only (T-EN-1, T-EN-3, T-CAP-1). The safety cap's birth suppression arrives with births (M-04); for now 150,000 is only the maximum starting count.
@@ -22,7 +22,16 @@ M-07 (food grid, regrowth and feeding) is complete with uniform fertility. The W
 - No reproduction, so a run can only lose prey.
 - Contention for a shared cell favors lower storage indices.
 
-No rendering or UI exists yet; the `app` and `headless` binaries are still placeholders.
+The M-17 Week 1 minimum (`headless run` with a printed summary) is complete. M-21 (minimal CSV export) is complete: T-CSV-1 to T-CSV-10 pass. See [Headless runner and CSV export](#headless-runner-and-csv-export-m-17-m-21).
+
+- **T-CSV-10 passed** (manual, Microsoft Excel on the Windows reference machine; Q15 answered with its working default). The 18,000-tick example opened as 11 separate columns, with 601 data rows plus the header.
+  - `tick` ran from 0 to 18000 and `sim_seconds` ended at 600.
+  - Decimal metric fields were recognized as numbers.
+  - `state_hash` showed its complete hexadecimal value, and sorting that column showed no truncation or precision loss.
+  - The average trait columns were constant across the run. This is expected: without reproduction or mutation, the population's traits do not change.
+- **T-HL-1 is deferred until M-16.** SCOPE's full M-17 includes scenario-aware JSON output (`--out`), which must name the scenario and its format version. Neither exists until scenario files arrive in M-16.
+
+No rendering or UI exists yet; the `app` binary is still a placeholder.
 
 ### Prey model as implemented (M-03, provisional)
 
@@ -62,13 +71,75 @@ No rendering or UI exists yet; the `app` and `headless` binaries are still place
   - A wanderer moves `wander_speed_fraction` (default 0.5) of its maximum along its heading.
   - Positions are clamped to the world edges. A wanderer pressed against an edge stays there until its next decision.
 
+## Headless runner and CSV export (M-17, M-21)
+
+`headless run` runs the built-in default scenario (scenario files arrive with M-16) for a fixed number of ticks, prints a summary, and optionally writes a CSV time series.
+
+```sh
+# Summary only
+cargo run -p headless -- run --seed 1 --ticks 18000
+
+# 10-minute run (30 ticks = 1 simulated second) with one CSV row per simulated second
+cargo run -p headless -- run --seed 1 --ticks 18000 --sample-every 30 --csv results.csv
+
+# Replace an existing file deliberately
+cargo run -p headless -- run --seed 1 --ticks 18000 --sample-every 30 --csv results.csv --overwrite
+
+cargo run -p headless -- run --help
+```
+
+**Options:**
+
+| Option | Meaning |
+| --- | --- |
+| `--seed <U64>` | Run seed (required) |
+| `--ticks <U64>` | Fixed ticks to run (required; 0 is valid) |
+| `--sample-every <TICKS>` | CSV row interval, at least 1; requires `--csv` |
+| `--csv <PATH>` | CSV output file; requires `--sample-every` |
+| `--overwrite` | Allow `--csv` to replace an existing file; requires `--csv` |
+
+**Summary:** the summary goes to stdout. It lists:
+
+- seed, requested and completed ticks, and simulated seconds
+- prey population and the average speed, size, sense range and energy
+- total food, cumulative food consumed and cumulative starvation deaths
+- the state hash, plus wall-clock elapsed time
+
+Elapsed time is reported only. It is never part of the results or the CSV. Averages print `n/a` when there are no prey.
+
+**Exit status:** 0 on success, 1 when a run fails (for example a CSV destination problem, reported on stderr naming the path), 2 for command-line usage errors (with usage help).
+
+**CSV schema (fixed order, one header row):** `tick, sim_seconds, prey_population, avg_speed, avg_size, avg_sense, avg_energy, total_food, cumulative_food_consumed, cumulative_starvation_deaths, state_hash`.
+
+**Sampling:** a row at tick 0 (before any step), at every multiple of `--sample-every`, and at the final tick when it is not a multiple. No row is duplicated, and a 0-tick run writes the header and the tick-0 row.
+  - So 300 ticks every 30 give 11 rows (0 to 300); 305 ticks give 12, ending at 305; the 18,000-tick example gives 601.
+  - Sampling only reads state. A run with CSV executes the same ticks, draws the same random numbers and ends in the same state as one without.
+
+**Formatting:**
+- Lines end in `\n`.
+- Integers are plain decimal.
+- Floats use Rust's shortest round-trip decimal form, with a `.` separator and no exponent, independent of locale. Whole values print without a fraction (`600`, not `600.0`).
+- Averages are empty fields when there are no prey; NaN or infinity is an error, never written.
+- `state_hash` is `0x` plus exactly 16 lowercase, zero-padded hexadecimal digits, so spreadsheets keep it as text.
+- The CSV contains no timestamps or other run-dependent data, so identical commands give byte-identical files.
+
+**File safety:**
+- The CSV is written to a sibling `<name>.partial` file and renamed into place only after every row is written and flushed. A failed run never truncates or replaces an existing file.
+- Without `--overwrite` the destination is reserved with an exclusive create, so an existing file is never replaced.
+- A missing parent directory, a directory used as the file name, or an existing `<name>.partial` file stops the run with an error naming the path.
+
+**Summary values in `sim`:** `Simulation::summary_metrics()` returns `sim::SummaryMetrics`. It reads state only, draws no random numbers, and sums in storage order with `f64` accumulation.
+  - `cumulative_food_consumed` is new authoritative state in `sim`: food units actually removed from cells (not energy), and part of the state hash.
+
+**T-CSV-10 manual check (passed, 2026-11-10):** the 18,000-tick example opened correctly in Microsoft Excel on the Windows reference machine; see Current status for what was verified. To repeat it, generate the example and open it in Excel (or LibreOffice Calc). Each column should be in its own column, decimals should read as numbers, and `state_hash` should show intact.
+
 ## Workspace structure
 
 | Path | Kind | Role |
 | --- | --- | --- |
 | `sim/` | library | All simulation rules. No graphics, UI, windowing, file I/O or clock. |
 | `app/` | binary + library | Desktop application (Bevy + egui). Window-free logic such as the stepping driver lives in its library target. |
-| `headless/` | binary | Command-line runner. No Bevy or egui. |
+| `headless/` | binary + library | Command-line runner and CSV export. Its library holds the testable run logic. No Bevy or egui. |
 
 Architecture invariants for contributors and Claude Code sessions are in [CLAUDE.md](CLAUDE.md).
 
@@ -81,18 +152,29 @@ cargo check --workspace
 cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo run -p headless
+cargo run -p headless -- run --seed 1 --ticks 300
 ```
 
-The suite has 108 tests: 93 in `sim` (91 unit, 2 integration) and 15 in `app`. Run only the tests for one SCOPE area:
+The suite has 153 tests:
+
+- 99 in `sim`: 97 unit and 2 integration.
+- 38 in `headless`: 26 unit and 12 process-level.
+- 16 in `app`: 15 driver tests plus T-DET-4.
+
+To run only the tests for one SCOPE area:
 
 ```sh
 cargo test -p sim --test determinism   # T-DET-1, T-DET-2
 cargo test -p sim t_rng_1              # T-RNG-1
 cargo test -p sim t_en_                # T-EN-1, T-EN-3
 cargo test -p sim t_cap_1              # T-CAP-1
-cargo test -p app driver               # T-FT-1 to T-FT-3, T-DET-4 (driver portion)
+cargo test -p app driver               # T-FT-1 to T-FT-3
+cargo test -p app t_det_4              # T-DET-4 (driver, headless path, direct stepping)
+cargo test -p headless t_csv_          # T-CSV-1 to T-CSV-9 (unit and process level)
+cargo test -p headless --test cli      # headless binary: exit codes, files, T-DET-4 binary check
 ```
+
+**Memory note (WSL2):** the `app` executables link all of Bevy with debug info, about 1 GB each, and linking one needs several GB of RAM. Two such links at once crashed the 7.7 GB WSL2 VM. For that reason T-DET-4 is a unit test inside the `app` library (`app/src/t_det_4.rs`), not an integration test, which would make Cargo link the `app` binary as well. If memory is tight, limit parallel jobs, for example `cargo test --workspace -j 2`.
 
 Dependency-boundary check (T-HL-6): neither command below should list any `bevy` or `egui` crate.
 
@@ -104,11 +186,11 @@ cargo tree -p headless
 ## Week 1 progress (Nov 10–16, 2026)
 
 - [x] M-01 Cargo workspace, pinned versions, CLAUDE.md, README skeleton
-- [x] M-02 Deterministic fixed-step core and stepping driver (T-DET-4 against `headless` pending M-17)
+- [x] M-02 Deterministic fixed-step core and stepping driver (T-DET-4 complete)
 - [x] M-03 Prey organisms, traits, energy, starvation, age (safety-cap birth suppression waits for births in M-04)
 - [x] M-07, M-09 (basic) Food grid, feeding, simple food seeking (uniform fertility; open world)
-- [ ] M-17 Minimal `headless run`
-- [ ] M-21 Minimal CSV export from `headless run` (`--sample-every`, `--csv`, `--overwrite`; T-CSV-1 to T-CSV-10), built with M-17 as one workflow. Not started.
+- [x] M-17 Week 1 minimum: `headless run` with printed summary. Scenario-aware JSON `--out` (T-HL-1) is deferred to M-16.
+- [x] M-21 Minimal CSV export (T-CSV-1 to T-CSV-10 pass; T-CSV-10 checked manually in Excel)
 - [ ] M-10, M-11 Minimal Bevy view with play, pause, reset, pan, zoom
 
 ## Reserve-hours ledger
@@ -148,3 +230,9 @@ cargo tree -p headless
 | 2026-11-10 | T-DET-1 runs on a smaller fixed scenario (300 prey, 128 × 128 world) so the must-priority suite stays fast in debug builds; T-DET-2 still uses the default scenario. |
 | 2026-11-10 | Known precision limit: positions are `f32`. At x = 2,048 adjacent `f32` values are about 2.4 × 10⁻⁴ apart, while the slowest step is 0.0033 units per tick, so a single step can round by several percent. This is deterministic but coarse; revisit (for example with `f64` positions) if it shows up in tier G profiling or behavior. |
 | 2026-11-10 | SCOPE.md updated to version 2.2: the minimal CSV export becomes Week 1 must-have M-21 (2.5 h, from reserve; totals 58.5 h implementation and 16.5 h reserve). C-04 now covers only advanced CSV and experiment export. If Week 1 runs short, graphical work is reduced to the minimum view before M-21 is cut. |
+| 2026-11-10 | `clap =4.6.7` (derive) pinned for the `headless` command line (SCOPE 7.1). CSV is written with the standard library; no CSV crate is needed for the fixed numeric schema. |
+| 2026-11-10 | `headless run` prints its summary and elapsed time. SCOPE's JSON `--out` and T-HL-1 wait for scenario files (M-16), because the JSON must name the scenario and its format version. |
+| 2026-11-10 | CSV files are written via `<name>.partial` and renamed into place; without `--overwrite` the destination is reserved with an exclusive create. Exit status 2 for usage errors, 1 for run failures. |
+| 2026-11-10 | `cumulative_food_consumed` (`f64`, food units actually removed from cells) added to `sim` state and the state hash; feeding behavior is unchanged. |
+| 2026-11-10 | T-DET-4 is an `app` library unit test rather than an integration test, to avoid a second ~1 GB Bevy link that exhausted WSL2 memory. |
+| 2026-11-10 | T-CSV-10 passed manually in Microsoft Excel on the Windows reference machine, so M-21 is complete. T-HL-1 (scenario-aware JSON output) is deferred until M-16, because scenario identity and format version do not exist yet. |

@@ -48,6 +48,13 @@ impl Fnv1a64 {
         self.write_u32(normalized.to_bits());
     }
 
+    /// Hashes the IEEE 754 bit pattern of an `f64`, little-endian, with `-0.0` written as
+    /// `0.0`, as for [`Fnv1a64::write_f32`].
+    pub(crate) fn write_f64(&mut self, value: f64) {
+        let normalized = if value == 0.0 { 0.0 } else { value };
+        self.write_u64(normalized.to_bits());
+    }
+
     pub(crate) fn write_u64_slice(&mut self, values: &[u64]) {
         for &value in values {
             self.write_u64(value);
