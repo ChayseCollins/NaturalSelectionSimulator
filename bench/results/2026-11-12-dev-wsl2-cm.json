@@ -1,0 +1,91 @@
+{
+  "tool": "natural-selection-simulator headless bench",
+  "output_version": 1,
+  "run_seed": 1,
+  "reps": 3,
+  "warmup_ticks": 300,
+  "measured_ticks": 3000,
+  "build": "release",
+  "profile_feature": false,
+  "os": "linux",
+  "arch": "x86_64",
+  "logical_cpus": 8,
+  "tiers": [
+    {
+      "tier": "b-c",
+      "scenario": "Benchmark tier C (classroom)",
+      "world_size": 512,
+      "speed_multiplier": 10,
+      "modes": [
+        {
+          "mode": "frozen",
+          "median_tick_ms": 0.780003,
+          "p95_tick_ms": 1.120304,
+          "p99_tick_ms": 1.434506,
+          "max_tick_ms": 8.785036,
+          "ticks_per_second": 1201.8231792233014,
+          "real_time_factor": 40.06077264077671,
+          "organism_ticks_per_second": 2644010.994291263,
+          "organisms_at_start": 2200,
+          "organisms_at_end": 2200,
+          "rtf_rule_met": true,
+          "p99_rule_met": true,
+          "phase_shares": {}
+        },
+        {
+          "mode": "ecological",
+          "median_tick_ms": 1.574006,
+          "p95_tick_ms": 2.211408,
+          "p99_tick_ms": 2.726311,
+          "max_tick_ms": 10.796743,
+          "ticks_per_second": 609.0205749951964,
+          "real_time_factor": 20.300685833173212,
+          "organism_ticks_per_second": 2435828.3384010126,
+          "organisms_at_start": 2770,
+          "organisms_at_end": 3856,
+          "rtf_rule_met": true,
+          "p99_rule_met": true,
+          "phase_shares": {}
+        }
+      ]
+    },
+    {
+      "tier": "b-m",
+      "scenario": "Benchmark tier M (minimum scale)",
+      "world_size": 1024,
+      "speed_multiplier": 1,
+      "modes": [
+        {
+          "mode": "frozen",
+          "median_tick_ms": 4.042616,
+          "p95_tick_ms": 5.421321,
+          "p99_tick_ms": 6.134625000000001,
+          "max_tick_ms": 13.04345,
+          "ticks_per_second": 237.2614750788972,
+          "real_time_factor": 7.90871583596324,
+          "organism_ticks_per_second": 2372614.7507889722,
+          "organisms_at_start": 10000,
+          "organisms_at_end": 10000,
+          "rtf_rule_met": true,
+          "p99_rule_met": true,
+          "phase_shares": {}
+        },
+        {
+          "mode": "ecological",
+          "median_tick_ms": 8.369934,
+          "p95_tick_ms": 10.520141,
+          "p99_tick_ms": 12.180349,
+          "max_tick_ms": 18.511473000000002,
+          "ticks_per_second": 119.54573012113656,
+          "real_time_factor": 3.9848576707045518,
+          "organism_ticks_per_second": 1988119.889207213,
+          "organisms_at_start": 12606,
+          "organisms_at_end": 14779,
+          "rtf_rule_met": true,
+          "p99_rule_met": true,
+          "phase_shares": {}
+        }
+      ]
+    }
+  ]
+}

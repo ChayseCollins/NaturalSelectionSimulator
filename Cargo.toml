@@ -21,7 +21,17 @@ rand_chacha = { version = "=0.10.0", default-features = false }
 rand_core = "=0.10.1"
 # Transcendental functions in `sim` (SCOPE 6.10). Default `arch` feature off: portable software implementations.
 libm = { version = "=0.2.16", default-features = false }
+# Scenario files (M-16, SCOPE 7.1): versioned, human-readable TOML. Both versions were
+# already in Cargo.lock through Bevy, so adding them downloads nothing (decision 2026-11-12).
+serde = { version = "=1.0.229", features = ["derive"] }
+toml = "=1.2.1"
 bevy = { version = "=0.20.1", default-features = false, features = ["2d"] }
 bevy_egui = "=0.43.1"
 egui = "=0.36.2"
 egui_plot = "=0.37.0"
+
+# `sim` is optimized even in dev and test builds (decision 2026-11-12): the must-priority
+# suite runs multi-thousand-tick simulations (T-IMP-1, T-NAV-7, T-DET-1) and the debug app
+# steps thousands of organisms per frame. Debug assertions and overflow checks stay on.
+[profile.dev.package.sim]
+opt-level = 3

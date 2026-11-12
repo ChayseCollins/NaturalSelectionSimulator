@@ -1,12 +1,15 @@
-//! Command-line runner for the Natural Selection Simulator (M-17, M-21).
+//! Command-line runner for the Natural Selection Simulator (M-17, M-18, M-21).
 //!
-//! A thin shell over `sim`'s public API (I-06): it parses arguments, steps a
-//! `sim::Simulation`, prints a summary, and writes the optional CSV time series. All file
-//! I/O and the wall-clock timing of a run live here, never in `sim` (I-08). This crate
-//! never depends on Bevy or egui (T-HL-6).
+//! A thin shell over `sim`'s public API (I-06): it reads scenario files, steps a
+//! `sim::Simulation`, prints a summary, and writes the optional JSON results and CSV time
+//! series; `bench` times the benchmark tiers. All file I/O and wall-clock timing live
+//! here, never in `sim` (I-08). This crate never depends on Bevy or egui (T-HL-6).
 
+pub mod bench;
 pub mod cli;
 pub mod csv;
+pub mod experiment;
+pub mod json;
 pub mod output;
 pub mod run;
 
@@ -14,7 +17,11 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-use sim::ValidationError;
+use sim::{ScenarioError, ValidationError};
+
+/// The baseline classroom preset, embedded at build time: the default scenario of both
+/// `headless run` and the app, so both print the same hash for the same seed.
+pub const BASELINE_PRESET: &str = include_str!("../../presets/baseline.scenario.toml");
 
 /// State hash as `0x` followed by exactly 16 lowercase hexadecimal digits, zero-padded.
 pub fn format_state_hash(hash: u64) -> String {
@@ -26,8 +33,17 @@ pub fn format_state_hash(hash: u64) -> String {
 pub enum HeadlessError {
     /// The scenario failed validation.
     InvalidConfig(Vec<ValidationError>),
+    /// The scenario file could not be read.
+    ScenarioRead { path: PathBuf, source: io::Error },
+    /// The scenario file is not a valid scenario.
+    Scenario {
+        path: Option<PathBuf>,
+        error: ScenarioError,
+    },
     /// Options that must be used together were not (normally caught by the parser).
     Usage(&'static str),
+    /// The `--seeds` list could not be parsed.
+    Seeds(String),
     /// The CSV destination exists and `--overwrite` was not given.
     DestinationExists(PathBuf),
     /// The CSV destination is a directory.
@@ -38,7 +54,7 @@ pub enum HeadlessError {
         path: PathBuf,
         source: io::Error,
     },
-    /// Writing CSV rows to `path` failed.
+    /// Writing CSV rows or JSON to `path` failed.
     Export {
         path: PathBuf,
         source: csv::ExportError,
@@ -57,7 +73,18 @@ impl fmt::Display for HeadlessError {
                 }
                 Ok(())
             }
+            Self::ScenarioRead { path, source } => {
+                write!(f, "could not read --scenario {}: {source}", path.display())
+            }
+            Self::Scenario { path, error } => {
+                match path {
+                    Some(path) => write!(f, "invalid scenario {}: ", path.display())?,
+                    None => write!(f, "invalid built-in scenario: ")?,
+                }
+                write!(f, "{}", error.to_string().replace('\n', "; "))
+            }
             Self::Usage(message) => write!(f, "{message}"),
+            Self::Seeds(message) => write!(f, "--seeds: {message}"),
             Self::DestinationExists(path) => write!(
                 f,
                 "{} already exists; pass --overwrite to replace it",
@@ -72,7 +99,7 @@ impl fmt::Display for HeadlessError {
                 source,
             } => write!(f, "could not {action} {}: {source}", path.display()),
             Self::Export { path, source } => {
-                write!(f, "could not write CSV to {}: {source}", path.display())
+                write!(f, "could not write to {}: {source}", path.display())
             }
             Self::Stdout(source) => write!(f, "could not print the summary: {source}"),
         }

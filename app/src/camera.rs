@@ -1,4 +1,5 @@
-//! World-camera math for the Week 1 view (M-10): fit, pan and zoom.
+//! World-camera math (M-10): fit, pan, zoom toward the cursor, and screen-to-world
+//! conversion for picking.
 //!
 //! Pure state with no Bevy types, so it is testable without a window. The camera only
 //! changes what is shown: it never touches the simulation, its random domains or its
@@ -70,6 +71,42 @@ impl CameraView {
             return;
         }
         self.scale = clamp_scale(self.scale * ZOOM_STEP.powf(-steps));
+    }
+
+    /// Zooms keeping the world point `anchor` (normally under the cursor) fixed on screen
+    /// (T-CAM-3: scroll zoom toward the cursor).
+    pub fn zoom_at(&mut self, steps: f32, anchor: (f32, f32)) {
+        if !anchor.0.is_finite() || !anchor.1.is_finite() {
+            return;
+        }
+        let before = self.scale;
+        self.zoom_steps(steps);
+        let ratio = self.scale / before;
+        self.center_x = anchor.0 + (self.center_x - anchor.0) * ratio;
+        self.center_y = anchor.1 + (self.center_y - anchor.1) * ratio;
+    }
+
+    /// World position under a point of the viewport, given in logical pixels from the
+    /// viewport's top-left corner (y down).
+    pub fn screen_to_world(&self, point: (f32, f32), viewport: (f32, f32)) -> (f32, f32) {
+        (
+            self.center_x + (point.0 - viewport.0 * 0.5) * self.scale,
+            self.center_y - (point.1 - viewport.1 * 0.5) * self.scale,
+        )
+    }
+
+    /// Viewport position (logical pixels, y down) of a world point.
+    pub fn world_to_screen(&self, world: (f32, f32), viewport: (f32, f32)) -> (f32, f32) {
+        (
+            (world.0 - self.center_x) / self.scale + viewport.0 * 0.5,
+            (self.center_y - world.1) / self.scale + viewport.1 * 0.5,
+        )
+    }
+
+    /// Keeps the center inside the world after a zoom.
+    pub fn clamp_to_world(&mut self, world_width: f32, world_height: f32) {
+        self.center_x = self.center_x.clamp(0.0, world_width);
+        self.center_y = self.center_y.clamp(0.0, world_height);
     }
 }
 
@@ -161,5 +198,45 @@ mod tests {
         );
         view.pan_screen(f32::NAN, 1.0, 512.0, 512.0);
         assert_valid(&view);
+    }
+
+    #[test]
+    fn zoom_at_keeps_the_anchor_fixed_on_screen() {
+        let mut view = default_view();
+        let viewport = (1280.0, 720.0);
+        let cursor = (900.0, 200.0);
+        let anchor = view.screen_to_world(cursor, viewport);
+        view.zoom_at(5.0, anchor);
+        let after = view.world_to_screen(anchor, viewport);
+        assert!((after.0 - cursor.0).abs() < 0.01 && (after.1 - cursor.1).abs() < 0.01);
+        view.zoom_at(f32::NAN, anchor);
+        view.zoom_at(1.0, (f32::NAN, 0.0));
+        assert_valid(&view);
+    }
+
+    /// T-CAM-1 (should): screen-to-world and back round-trips within 0.5 px at the
+    /// minimum and maximum zoom.
+    #[test]
+    fn t_cam_1_screen_world_round_trip() {
+        let viewport = (1600.0, 900.0);
+        for scale in [MIN_SCALE, 1.0, MAX_SCALE] {
+            let view = CameraView {
+                center_x: 300.0,
+                center_y: 200.0,
+                scale,
+            };
+            for point in [(0.0, 0.0), (800.0, 450.0), (1599.0, 899.0), (123.4, 567.8)] {
+                let world = view.screen_to_world(point, viewport);
+                let back = view.world_to_screen(world, viewport);
+                assert!((back.0 - point.0).abs() <= 0.5 && (back.1 - point.1).abs() <= 0.5);
+            }
+        }
+        let view = default_view();
+        assert_eq!(
+            view.screen_to_world((640.0, 360.0), (1280.0, 720.0)),
+            (256.0, 256.0)
+        );
+        let (_, top) = view.screen_to_world((640.0, 0.0), (1280.0, 720.0));
+        assert!(top > 256.0, "screen y down is world y up");
     }
 }

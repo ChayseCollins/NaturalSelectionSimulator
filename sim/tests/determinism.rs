@@ -1,18 +1,21 @@
 //! Determinism tests through the public `sim` API (SCOPE 15.2).
 //!
-//! These run on the current state hash (tick, seeds, prey columns including behavior
-//! state, starvation count, food grid and generator positions) and are rerun unchanged as
-//! the hash grows (SCOPE 6.10, Week 2).
+//! These run on the complete state hash (SCOPE 6.10): every organism column of both
+//! species, the food grid, counters, the route queue, the terrain checksum, the tick and
+//! the generator positions.
 
 use sim::{ScenarioConfig, Simulation};
 
-/// Small fixed scenario for the long T-DET-1 run, so the must-priority suite stays fast
-/// in debug builds: 300 prey seeking food on a 128 × 128 world.
+/// Small fixed scenario for the long T-DET-1 run, so the must-priority suite stays fast:
+/// the baseline model (prey and predators on generated terrain) on a 160 × 160 world.
 fn small_scenario() -> ScenarioConfig {
-    let mut config = ScenarioConfig::default();
-    config.world.width = 128.0;
-    config.world.height = 128.0;
-    config.prey.start_count = 300;
+    let mut config =
+        ScenarioConfig::from_toml_str(include_str!("../../presets/baseline.scenario.toml"))
+            .expect("baseline parses");
+    config.world.width = 160.0;
+    config.world.height = 160.0;
+    config.species.prey.start = sim::StartPopulation::Count(250);
+    config.species.predator.start = sim::StartPopulation::Count(25);
     config
 }
 
@@ -34,12 +37,12 @@ fn t_det_1_same_seed_gives_equal_hashes() {
         assert_eq!(b.tick(), checkpoint);
         assert_eq!(a.organisms(), b.organisms(), "tick {checkpoint}");
         assert_eq!(a.food(), b.food(), "tick {checkpoint}");
-        assert_eq!(a.starvation_deaths(), b.starvation_deaths());
+        assert_eq!(a.counters(), b.counters());
         assert_eq!(a.state_hash(), b.state_hash(), "tick {checkpoint}");
     }
     assert!(
-        !a.organisms().is_empty(),
-        "prey with food survive to tick 10,000"
+        a.counters().prey.births > 0 && a.counters().prey.deaths() > 0,
+        "a real ecological run"
     );
 }
 

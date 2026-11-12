@@ -1,20 +1,22 @@
-//! The `run` command (M-17) with optional CSV sampling (M-21).
+//! The `run` command (M-17) with optional JSON results (X4) and CSV sampling (M-21).
 //!
 //! Every path steps the same `sim::Simulation`; this module only decides when to observe
-//! it. Sampling reads summaries between ticks, so a run with CSV output executes exactly
-//! the same ticks, draws exactly the same random numbers, and ends in exactly the same
-//! state as a run without it (T-CSV-4, T-CSV-5).
+//! it. Sampling reads summaries between ticks, so a run with CSV or JSON output executes
+//! exactly the same ticks, draws exactly the same random numbers, and ends in exactly the
+//! same state as a run without them (T-CSV-4, T-CSV-5).
 
+use std::fs;
 use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use sim::{ScenarioConfig, Simulation, SummaryMetrics};
+use sim::{ScenarioConfig, Simulation, Species, SummaryMetrics};
 
 use crate::cli::RunArgs;
 use crate::csv::{CsvWriter, ExportError};
-use crate::{HeadlessError, format_state_hash, output};
+use crate::json::Json;
+use crate::{BASELINE_PRESET, HeadlessError, format_state_hash, output};
 
 /// Result of a run, before anything is printed.
 #[derive(Debug)]
@@ -23,8 +25,26 @@ pub struct RunOutcome {
     /// Data rows written to the CSV, if one was requested.
     pub csv_rows: Option<u64>,
     /// Wall-clock time spent stepping (and writing CSV). Reported only; never part of the
-    /// results or the CSV.
+    /// simulation results or the CSV.
     pub elapsed: Duration,
+}
+
+/// The scenario at `path`, or the built-in baseline preset when there is none.
+pub fn load_scenario(path: Option<&Path>) -> Result<ScenarioConfig, HeadlessError> {
+    match path {
+        None => ScenarioConfig::from_toml_str(BASELINE_PRESET)
+            .map_err(|error| HeadlessError::Scenario { path: None, error }),
+        Some(path) => {
+            let text = fs::read_to_string(path).map_err(|source| HeadlessError::ScenarioRead {
+                path: path.to_path_buf(),
+                source,
+            })?;
+            ScenarioConfig::from_toml_str(&text).map_err(|error| HeadlessError::Scenario {
+                path: Some(path.to_path_buf()),
+                error,
+            })
+        }
+    }
 }
 
 /// Steps `simulation` until tick `end`, calling `observe` with a summary at the starting
@@ -61,31 +81,31 @@ pub fn write_csv_run<W: Write>(
     csv.finish()
 }
 
-/// Runs the command with the built-in default scenario, without printing. This is the
-/// path the CLI uses.
+/// Runs the command without printing: loads the scenario (`--scenario`, or the built-in
+/// baseline preset), runs it, and writes the optional CSV and JSON files.
 pub fn execute(args: &RunArgs) -> Result<RunOutcome, HeadlessError> {
-    execute_with_config(&ScenarioConfig::default(), args)
+    let config = load_scenario(args.scenario.as_deref())?;
+    execute_with_config(&config, args)
 }
 
-/// [`execute`] with an explicit scenario, for tests. The CLI always passes the default.
+/// [`execute`] with an explicit scenario (`args.scenario` is used only as the label in
+/// the JSON output).
 pub fn execute_with_config(
     config: &ScenarioConfig,
     args: &RunArgs,
 ) -> Result<RunOutcome, HeadlessError> {
-    if args.overwrite && args.csv.is_none() {
-        return Err(HeadlessError::Usage("--overwrite requires --csv"));
+    if args.overwrite && args.csv.is_none() && args.out.is_none() {
+        return Err(HeadlessError::Usage("--overwrite requires --csv or --out"));
     }
     let mut simulation =
         Simulation::new(config, args.seed).map_err(HeadlessError::InvalidConfig)?;
     let started = Instant::now();
     let csv_rows = match (&args.csv, args.sample_every) {
-        (Some(path), Some(every)) => Some(write_csv_file(
-            &mut simulation,
-            args.ticks,
-            every,
-            path,
-            args.overwrite,
-        )?),
+        (Some(path), Some(every)) => {
+            Some(output::write_file_safely(path, args.overwrite, |writer| {
+                write_csv_run(&mut simulation, args.ticks, every, writer)
+            })?)
+        }
         (None, None) => {
             simulation.step_n(args.ticks);
             None
@@ -96,23 +116,115 @@ pub fn execute_with_config(
             ));
         }
     };
-    Ok(RunOutcome {
+    let elapsed = started.elapsed();
+    let outcome = RunOutcome {
         simulation,
         csv_rows,
-        elapsed: started.elapsed(),
-    })
+        elapsed,
+    };
+    if let Some(path) = &args.out {
+        let text = run_json(args, &outcome).to_pretty_string();
+        output::write_file_safely(path, args.overwrite, |writer| {
+            writer.write_all(text.as_bytes())?;
+            writer.flush()?;
+            Ok(())
+        })?;
+    }
+    Ok(outcome)
 }
 
-fn write_csv_file(
-    simulation: &mut Simulation,
-    end: u64,
-    sample_every: NonZeroU64,
-    path: &Path,
-    overwrite: bool,
-) -> Result<u64, HeadlessError> {
-    output::write_file_safely(path, overwrite, |writer| {
-        write_csv_run(simulation, end, sample_every, writer)
-    })
+fn species_json(summary: &SummaryMetrics, species: Species) -> Json {
+    let stats = summary.species(species);
+    let counters = summary.counters.species(species);
+    let extinct = match species {
+        Species::Prey => summary.prey_extinct_at,
+        Species::Predator => summary.predator_extinct_at,
+    };
+    Json::Object(vec![
+        ("population", Json::uint(stats.population as u64)),
+        ("mean_speed", Json::opt_f64(stats.mean_speed)),
+        ("mean_size", Json::opt_f64(stats.mean_size)),
+        ("mean_sense", Json::opt_f64(stats.mean_sense)),
+        ("mean_energy", Json::opt_f64(stats.mean_energy)),
+        ("mean_generation", Json::opt_f64(stats.mean_generation)),
+        (
+            "max_generation",
+            Json::opt_u64(stats.max_generation.map(u64::from)),
+        ),
+        ("cumulative_births", Json::uint(counters.births)),
+        ("cumulative_deaths", Json::uint(counters.deaths())),
+        (
+            "cumulative_starvation_deaths",
+            Json::uint(counters.starvation_deaths),
+        ),
+        (
+            "cumulative_predation_deaths",
+            Json::uint(counters.predation_deaths),
+        ),
+        ("cumulative_age_deaths", Json::uint(counters.age_deaths)),
+        ("extinct_at_tick", Json::opt_u64(extinct)),
+    ])
+}
+
+/// The JSON results (X4): scenario name and format version, seeds, tick count, final
+/// metrics per species, state hash and elapsed time. Only `elapsed_seconds` depends on
+/// the machine's speed (T-HL-4).
+pub fn run_json(args: &RunArgs, outcome: &RunOutcome) -> Json {
+    let s = &outcome.simulation;
+    let m = s.summary_metrics();
+    Json::Object(vec![
+        (
+            "tool",
+            Json::str("natural-selection-simulator headless run"),
+        ),
+        ("output_version", Json::uint(1)),
+        (
+            "scenario",
+            Json::Object(vec![
+                ("name", Json::str(s.config().name.clone())),
+                (
+                    "format_version",
+                    Json::uint(u64::from(s.config().format_version)),
+                ),
+                (
+                    "file",
+                    args.scenario
+                        .as_ref()
+                        .map_or(Json::Null, |p| Json::str(p.display().to_string())),
+                ),
+            ]),
+        ),
+        ("run_seed", Json::uint(s.run_seed())),
+        ("terrain_seed", Json::uint(s.terrain_seed())),
+        ("ticks", Json::uint(m.tick)),
+        (
+            "ticks_per_second",
+            Json::uint(u64::from(s.ticks_per_second())),
+        ),
+        ("sim_seconds", Json::Float(m.sim_seconds)),
+        ("state_hash", Json::str(format_state_hash(m.state_hash))),
+        (
+            "final",
+            Json::Object(vec![
+                ("prey", species_json(&m, Species::Prey)),
+                ("predator", species_json(&m, Species::Predator)),
+                ("successful_predations", Json::uint(m.counters.predations())),
+                ("total_food", Json::Float(m.total_food)),
+                (
+                    "cumulative_food_consumed",
+                    Json::Float(m.cumulative_food_consumed),
+                ),
+                (
+                    "population_cap_reached",
+                    Json::Bool(m.population_cap_reached),
+                ),
+            ]),
+        ),
+        (
+            "elapsed_seconds",
+            Json::Float(outcome.elapsed.as_secs_f64()),
+        ),
+    ])
 }
 
 /// Runs the command and prints the summary to `out`.
@@ -122,27 +234,59 @@ pub fn run_command(args: &RunArgs, out: &mut impl Write) -> Result<RunOutcome, H
     Ok(outcome)
 }
 
-/// Prints the final summary. Averages with no prey print as `n/a`.
+/// Prints the final summary. Averages with no organisms print as `n/a`.
 pub fn print_summary(
     out: &mut impl Write,
     args: &RunArgs,
     outcome: &RunOutcome,
 ) -> std::io::Result<()> {
-    let m = outcome.simulation.summary_metrics();
+    let s = &outcome.simulation;
+    let m = s.summary_metrics();
     let average = |value: Option<f64>| value.map_or_else(|| "n/a".to_string(), |v| v.to_string());
+    let generation =
+        |value: Option<u32>| value.map_or_else(|| "n/a".to_string(), |v| v.to_string());
+    let extinct = |value: Option<u64>| {
+        value.map_or_else(
+            || "no".to_string(),
+            |t| {
+                format!(
+                    "yes, at tick {t} ({} s)",
+                    t as f64 / f64::from(s.ticks_per_second())
+                )
+            },
+        )
+    };
+    let scenario = match &args.scenario {
+        Some(path) => format!("{} ({})", s.config().name, path.display()),
+        None => format!("{} (built-in)", s.config().name),
+    };
+    let c = &m.counters;
     let lines = [
-        ("scenario", "built-in default".to_string()),
+        ("scenario", scenario),
         ("run seed", args.seed.to_string()),
+        ("terrain seed", s.terrain_seed().to_string()),
         (
             "ticks",
             format!("{} requested, {} completed", args.ticks, m.tick),
         ),
         ("simulated seconds", m.sim_seconds.to_string()),
-        ("prey population", m.prey_population.to_string()),
-        ("average speed", average(m.avg_speed)),
-        ("average size", average(m.avg_size)),
-        ("average sense range", average(m.avg_sense)),
-        ("average energy", average(m.avg_energy)),
+        ("prey population", m.prey.population.to_string()),
+        ("average speed", average(m.prey.mean_speed)),
+        ("average size", average(m.prey.mean_size)),
+        ("average sense range", average(m.prey.mean_sense)),
+        ("average energy", average(m.prey.mean_energy)),
+        ("prey max generation", generation(m.prey.max_generation)),
+        ("predator population", m.predator.population.to_string()),
+        ("predator average speed", average(m.predator.mean_speed)),
+        ("predator average size", average(m.predator.mean_size)),
+        (
+            "predator average sense range",
+            average(m.predator.mean_sense),
+        ),
+        (
+            "predator max generation",
+            generation(m.predator.max_generation),
+        ),
         ("total food", m.total_food.to_string()),
         (
             "cumulative food consumed",
@@ -150,7 +294,25 @@ pub fn print_summary(
         ),
         (
             "cumulative starvation deaths",
-            m.cumulative_starvation_deaths.to_string(),
+            c.prey.starvation_deaths.to_string(),
+        ),
+        ("cumulative prey births", c.prey.births.to_string()),
+        ("cumulative predator births", c.predator.births.to_string()),
+        ("cumulative predations", c.predations().to_string()),
+        (
+            "predator starvation deaths",
+            c.predator.starvation_deaths.to_string(),
+        ),
+        ("prey extinct", extinct(m.prey_extinct_at)),
+        ("predators extinct", extinct(m.predator_extinct_at)),
+        (
+            "population cap reached",
+            if m.population_cap_reached {
+                "yes"
+            } else {
+                "no"
+            }
+            .to_string(),
         ),
         ("state hash", format_state_hash(m.state_hash)),
     ];
@@ -165,6 +327,9 @@ pub fn print_summary(
             path.display()
         )?;
     }
+    if let Some(path) = &args.out {
+        writeln!(out, "{:<30}written to {}", "json:", path.display())?;
+    }
     writeln!(
         out,
         "{:<30}{:.3} s (not part of the results)",
@@ -175,21 +340,26 @@ pub fn print_summary(
 
 #[cfg(test)]
 mod tests {
+    use sim::StartPopulation;
+
     use super::*;
 
-    /// A small scenario so unit tests stay fast: 50 prey on a 64 × 64 world.
+    /// A small scenario so unit tests stay fast: 50 prey and 5 predators on 64 × 64.
     fn small() -> ScenarioConfig {
-        let mut config = ScenarioConfig::default();
+        let mut config = load_scenario(None).expect("baseline");
         config.world.width = 64.0;
         config.world.height = 64.0;
-        config.prey.start_count = 50;
+        config.species.prey.start = StartPopulation::Count(50);
+        config.species.predator.start = StartPopulation::Count(5);
         config
     }
 
     fn args(seed: u64, ticks: u64) -> RunArgs {
         RunArgs {
+            scenario: None,
             seed,
             ticks,
+            out: None,
             sample_every: None,
             csv: None,
             overwrite: false,
@@ -269,7 +439,7 @@ mod tests {
     #[test]
     fn t_csv_6_empty_population_rows_have_empty_averages() {
         let mut config = small();
-        config.prey.start_count = 0;
+        config.species.prey.start = StartPopulation::Count(0);
         let mut simulation = Simulation::new(&config, 1).expect("valid");
         let mut out = Vec::new();
         write_csv_run(
@@ -282,7 +452,7 @@ mod tests {
         let text = String::from_utf8(out).expect("utf-8");
         for row in text.lines().skip(1) {
             let fields: Vec<&str> = row.split(',').collect();
-            assert_eq!(fields.len(), 11);
+            assert_eq!(fields.len(), crate::csv::COLUMNS.len());
             assert_eq!(fields[2], "0");
             assert_eq!(&fields[3..7], ["", "", "", ""], "{row}");
         }
@@ -309,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn inconsistent_csv_options_are_rejected_without_running() {
+    fn inconsistent_options_are_rejected_without_running() {
         let mut overwrite_only = args(1, 5);
         overwrite_only.overwrite = true;
         assert!(matches!(
@@ -327,7 +497,7 @@ mod tests {
     #[test]
     fn summary_prints_unavailable_averages_and_fixed_width_hash() {
         let mut config = small();
-        config.prey.start_count = 0;
+        config.species.prey.start = StartPopulation::Count(0);
         let run_args = args(1, 3);
         let outcome = execute_with_config(&config, &run_args).expect("run");
         let mut out = Vec::new();
@@ -335,9 +505,40 @@ mod tests {
         let text = String::from_utf8(out).expect("utf-8");
         assert!(text.contains("ticks:                        3 requested, 3 completed"));
         assert!(text.contains("average speed:                n/a"), "{text}");
-        assert!(text.contains("average energy:               n/a"));
         let hash = format_state_hash(outcome.simulation.state_hash());
         assert!(text.contains(&format!("state hash:                   {hash}")));
         assert!(!text.contains("NaN"));
+    }
+
+    /// T-HL-1 (library part): the JSON names the scenario, format version, seeds, ticks,
+    /// per-species final metrics with births, deaths and predations, the hash and timing.
+    #[test]
+    fn t_hl_1_json_has_every_required_field() {
+        let outcome = execute_with_config(&small(), &args(3, 90)).expect("run");
+        let text = run_json(&args(3, 90), &outcome).to_pretty_string();
+        for key in [
+            "\"name\": \"Baseline predator-prey\"",
+            "\"format_version\": 1",
+            "\"run_seed\": 3",
+            "\"terrain_seed\": 1001",
+            "\"ticks\": 90",
+            "\"state_hash\": \"0x",
+            "\"prey\": {",
+            "\"predator\": {",
+            "\"cumulative_births\"",
+            "\"cumulative_deaths\"",
+            "\"successful_predations\"",
+            "\"max_generation\"",
+            "\"elapsed_seconds\"",
+        ] {
+            assert!(text.contains(key), "{key} missing:\n{text}");
+        }
+    }
+
+    #[test]
+    fn the_built_in_scenario_is_the_baseline_preset() {
+        let config = load_scenario(None).expect("valid");
+        assert_eq!(config.name, "Baseline predator-prey");
+        assert_eq!(config.terrain.seed, Some(1001));
     }
 }

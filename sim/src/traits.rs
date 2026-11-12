@@ -60,6 +60,14 @@ impl Traits {
             TraitId::Sense => self.sense,
         }
     }
+
+    pub fn set(&mut self, id: TraitId, value: f32) {
+        match id {
+            TraitId::Speed => self.speed = value,
+            TraitId::Size => self.size = value,
+            TraitId::Sense => self.sense = value,
+        }
+    }
 }
 
 /// Largest distance an organism may move in one tick on terrain with speed multiplier 1

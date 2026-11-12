@@ -1,5 +1,6 @@
 //! T-DET-4: the app's stepping driver, the `headless run` path and direct stepping reach
-//! the same state at tick 1,000 for the same scenario and seed. The driver is fed two
+//! the same state at tick 1,000 for the same scenario and seed. The scenario is the
+//! baseline classroom preset, which both the app and `headless run` open by default. The driver is fed two
 //! different frame-time sequences, one hitting the per-frame cap and building a backlog.
 //! No window is opened. The binary-level check of `headless` is in
 //! `headless/tests/cli.rs`.
@@ -11,14 +12,15 @@
 use std::time::Duration;
 
 use crate::driver::{DriverLimits, Speed, SteppingDriver};
+use crate::presets;
 use headless::cli::RunArgs;
-use sim::{ScenarioConfig, Simulation};
+use sim::Simulation;
 
 const SEED: u64 = 1;
 const TICKS: u64 = 1_000;
 
 fn new_sim() -> Simulation {
-    Simulation::new(&ScenarioConfig::default(), SEED).expect("valid default scenario")
+    Simulation::new(&presets::baseline().config, SEED).expect("valid baseline scenario")
 }
 
 /// Runs the driver at 10× (300 ticks per real second) through `frames`, then drains any
@@ -59,8 +61,10 @@ fn t_det_4_driver_headless_and_direct_stepping_agree() {
     direct.step_n(TICKS);
 
     let headless_run = headless::run::execute(&RunArgs {
+        scenario: None,
         seed: SEED,
         ticks: TICKS,
+        out: None,
         sample_every: None,
         csv: None,
         overwrite: false,

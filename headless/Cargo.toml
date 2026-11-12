@@ -10,3 +10,7 @@ publish.workspace = true
 [dependencies]
 sim.workspace = true
 clap.workspace = true
+
+[features]
+# Per-phase timing in `headless bench` (M-18): `cargo run --release -p headless --features profile -- bench`.
+profile = ["sim/profile"]

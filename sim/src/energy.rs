@@ -181,7 +181,7 @@ mod tests {
             sense: limits::ENERGY_SENSE.max,
         };
         let t = traits(limits::SPEED.max, limits::SIZE.max, limits::SENSE.max);
-        let cost = cost_per_tick(&c, t, 1.0, limits::TICKS_PER_SECOND_MIN);
+        let cost = cost_per_tick(&c, t, 1.0, limits::TICKS_PER_SECOND.min as u32);
         assert!(cost.is_finite() && cost > 0.0);
     }
 }

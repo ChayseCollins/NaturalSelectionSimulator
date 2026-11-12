@@ -92,6 +92,23 @@ pub(crate) fn unit_f32(rng: &mut ChaCha8Rng) -> f32 {
     (rng.next_u64() >> 40) as f32 * (1.0 / 16_777_216.0)
 }
 
+/// Uniform integer in `[0, n)` from exactly one 64-bit draw, by multiply-and-shift
+/// (bias below `n / 2^64`, negligible for any grid). Returns 0 when `n` is 0.
+pub(crate) fn below(rng: &mut ChaCha8Rng, n: u64) -> u64 {
+    ((u128::from(rng.next_u64()) * u128::from(n)) >> 64) as u64
+}
+
+/// Two uniform `f32` values in `[0, 1)` from exactly one 64-bit draw: the top 24 bits of
+/// each 32-bit half.
+pub(crate) fn two_unit_f32(rng: &mut ChaCha8Rng) -> (f32, f32) {
+    let bits = rng.next_u64();
+    let scale = 1.0 / 16_777_216.0;
+    (
+        (bits >> 40) as f32 * scale,
+        ((bits >> 8) & 0xFF_FFFF) as f32 * scale,
+    )
+}
+
 /// Standard normal sample by the Box–Muller transform, from exactly two 64-bit draws, with
 /// `ln`, `sqrt` and `cos` from `libm` (SCOPE 6.10). The sine half is discarded so every
 /// sample costs the same number of draws.

@@ -5112,6 +5112,8 @@ dependencies = [
  "libm",
  "rand_chacha",
  "rand_core",
+ "serde",
+ "toml",
 ]
 
 [[package]]

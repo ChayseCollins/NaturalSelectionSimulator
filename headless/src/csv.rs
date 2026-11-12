@@ -1,5 +1,9 @@
 //! CSV time-series writer (M-21), on any [`std::io::Write`] target.
 //!
+//! Columns: the eleven fixed Week 1 columns of SCOPE 16 in their tested order (prey
+//! values; `cumulative_starvation_deaths` counts prey), then, appended as later milestones
+//! allow, predator, birth, predation and generation columns.
+//!
 //! Format (fixed; tested):
 //! - One header row, then one row per observation, each ending in `\n`. No metadata,
 //!   timestamps or other run-dependent data.
@@ -20,7 +24,7 @@ use sim::SummaryMetrics;
 use crate::format_state_hash;
 
 /// Column names, in output order.
-pub const COLUMNS: [&str; 11] = [
+pub const COLUMNS: [&str; 22] = [
     "tick",
     "sim_seconds",
     "prey_population",
@@ -32,7 +36,22 @@ pub const COLUMNS: [&str; 11] = [
     "cumulative_food_consumed",
     "cumulative_starvation_deaths",
     "state_hash",
+    // Appended in Week 2 and later (M-21 allows appending).
+    "predator_population",
+    "avg_predator_speed",
+    "avg_predator_size",
+    "avg_predator_sense",
+    "avg_predator_energy",
+    "cumulative_prey_births",
+    "cumulative_predator_births",
+    "cumulative_predations",
+    "cumulative_predator_starvation_deaths",
+    "prey_max_generation",
+    "predator_max_generation",
 ];
+
+/// Number of fixed Week 1 columns at the start of every row.
+pub const WEEK_1_COLUMNS: usize = 11;
 
 #[derive(Debug)]
 pub enum ExportError {
@@ -121,20 +140,33 @@ pub fn format_row(m: &SummaryMetrics) -> Result<String, ExportError> {
         Some(value) => number(column, value),
         None => Ok(String::new()),
     };
+    let generation = |value: Option<u32>| value.map_or_else(String::new, |g| g.to_string());
+    let c = &m.counters;
     let fields = [
         tick.to_string(),
         number("sim_seconds", m.sim_seconds)?,
-        m.prey_population.to_string(),
-        optional("avg_speed", m.avg_speed)?,
-        optional("avg_size", m.avg_size)?,
-        optional("avg_sense", m.avg_sense)?,
-        optional("avg_energy", m.avg_energy)?,
+        m.prey.population.to_string(),
+        optional("avg_speed", m.prey.mean_speed)?,
+        optional("avg_size", m.prey.mean_size)?,
+        optional("avg_sense", m.prey.mean_sense)?,
+        optional("avg_energy", m.prey.mean_energy)?,
         number("total_food", m.total_food)?,
         number("cumulative_food_consumed", m.cumulative_food_consumed)?,
-        m.cumulative_starvation_deaths.to_string(),
+        c.prey.starvation_deaths.to_string(),
         format_state_hash(m.state_hash),
+        m.predator.population.to_string(),
+        optional("avg_predator_speed", m.predator.mean_speed)?,
+        optional("avg_predator_size", m.predator.mean_size)?,
+        optional("avg_predator_sense", m.predator.mean_sense)?,
+        optional("avg_predator_energy", m.predator.mean_energy)?,
+        c.prey.births.to_string(),
+        c.predator.births.to_string(),
+        c.predations().to_string(),
+        c.predator.starvation_deaths.to_string(),
+        generation(m.prey.max_generation),
+        generation(m.predator.max_generation),
     ];
-    let mut line = String::with_capacity(160);
+    let mut line = String::with_capacity(320);
     for (index, field) in fields.iter().enumerate() {
         if index > 0 {
             line.push(',');
@@ -150,20 +182,51 @@ pub fn format_row(m: &SummaryMetrics) -> Result<String, ExportError> {
 mod tests {
     use std::io::BufWriter;
 
+    use sim::{Counters, SpeciesCounters, SpeciesStats};
+
     use super::*;
 
     fn metrics(tick: u64) -> SummaryMetrics {
         SummaryMetrics {
             tick,
             sim_seconds: tick as f64 / 30.0,
-            prey_population: 3,
-            avg_speed: Some(1.25),
-            avg_size: Some(1.0),
-            avg_sense: Some(10.5),
-            avg_energy: Some(4.0),
+            prey: SpeciesStats {
+                population: 3,
+                mean_speed: Some(1.25),
+                mean_size: Some(1.0),
+                mean_sense: Some(10.5),
+                mean_energy: Some(4.0),
+                mean_generation: Some(0.5),
+                max_generation: Some(2),
+            },
+            predator: SpeciesStats {
+                population: 1,
+                mean_speed: Some(1.5),
+                mean_size: Some(2.0),
+                mean_sense: Some(14.0),
+                mean_energy: Some(7.5),
+                mean_generation: Some(1.0),
+                max_generation: Some(1),
+            },
             total_food: 65_536.0,
             cumulative_food_consumed: 0.375,
-            cumulative_starvation_deaths: 2,
+            counters: Counters {
+                prey: SpeciesCounters {
+                    births: 4,
+                    starvation_deaths: 2,
+                    predation_deaths: 5,
+                    age_deaths: 0,
+                },
+                predator: SpeciesCounters {
+                    births: 1,
+                    starvation_deaths: 6,
+                    predation_deaths: 0,
+                    age_deaths: 0,
+                },
+            },
+            prey_extinct_at: None,
+            predator_extinct_at: None,
+            population_cap_reached: false,
             state_hash: 0x0000_00AB_CDEF_0123,
         }
     }
@@ -204,25 +267,27 @@ mod tests {
     }
 
     #[test]
-    fn header_has_the_fixed_column_order() {
+    fn header_keeps_the_week_1_columns_first_and_appends_the_rest() {
         let mut out = Vec::new();
         write_csv(&mut out, &[]).expect("in-memory write");
-        assert_eq!(
-            String::from_utf8(out).expect("utf-8"),
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(text.starts_with(
             "tick,sim_seconds,prey_population,avg_speed,avg_size,avg_sense,avg_energy,\
-             total_food,cumulative_food_consumed,cumulative_starvation_deaths,state_hash\n"
-        );
+             total_food,cumulative_food_consumed,cumulative_starvation_deaths,state_hash,"
+        ));
+        assert!(text.ends_with("prey_max_generation,predator_max_generation\n"));
+        assert_eq!(text.trim_end().split(',').count(), COLUMNS.len());
     }
 
     #[test]
     fn rows_use_locale_independent_shortest_formatting() {
         assert_eq!(
             format_row(&metrics(45)).expect("finite"),
-            "45,1.5,3,1.25,1,10.5,4,65536,0.375,2,0x000000abcdef0123\n"
+            "45,1.5,3,1.25,1,10.5,4,65536,0.375,2,0x000000abcdef0123,1,1.5,2,14,7.5,4,1,5,6,2,1\n"
         );
         let mut m = metrics(1);
         m.sim_seconds = 1.0 / 30.0;
-        m.avg_energy = Some(-0.0);
+        m.prey.mean_energy = Some(-0.0);
         m.total_food = 1e20;
         let row = format_row(&m).expect("finite");
         assert!(row.starts_with("1,0.03333333333333333,"), "{row}");
@@ -236,18 +301,15 @@ mod tests {
     #[test]
     fn t_csv_6_empty_population_writes_empty_averages() {
         let mut m = metrics(30);
-        m.prey_population = 0;
-        m.avg_speed = None;
-        m.avg_size = None;
-        m.avg_sense = None;
-        m.avg_energy = None;
+        m.prey = SpeciesStats::default();
+        m.predator = SpeciesStats::default();
         assert_eq!(
             format_row(&m).expect("finite"),
-            "30,1,0,,,,,65536,0.375,2,0x000000abcdef0123\n"
+            "30,1,0,,,,,65536,0.375,2,0x000000abcdef0123,0,,,,,4,1,5,6,,\n"
         );
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let mut m = metrics(7);
-            m.avg_speed = Some(bad);
+            m.prey.mean_speed = Some(bad);
             assert!(matches!(
                 format_row(&m),
                 Err(ExportError::NonFinite {
@@ -295,7 +357,6 @@ mod tests {
         csv.write_row(&metrics(0))
             .expect("buffered row write succeeds");
         assert!(matches!(csv.finish(), Err(ExportError::Io(_))));
-
         assert!(matches!(
             write_csv(FailOnFlush, &[metrics(0)]),
             Err(ExportError::Io(_))

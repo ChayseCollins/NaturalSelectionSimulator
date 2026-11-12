@@ -11,3 +11,9 @@ publish.workspace = true
 rand_chacha.workspace = true
 rand_core.workspace = true
 libm.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[features]
+# Per-phase wall-clock timers for `headless bench` (M-18). Timing never affects results.
+profile = []

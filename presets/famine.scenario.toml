@@ -1,0 +1,90 @@
+# Natural Selection Simulator scenario (format version 1).
+# Famine preset (S-01): the baseline world with a food shortage after 20 simulated
+# minutes. Every value is editable; see docs/SCENARIO_FORMAT.md.
+
+format_version = 1
+name = "Famine"
+description = "The baseline predator-prey world, but after 20 simulated minutes every patch of land can only regrow 40% of its usual food."
+learning_goal = "Compare prey numbers, size and speed before and after the famine starts at minute 20. Which traits do better when food is scarce? Replay with a new seed: does the same thing happen?"
+seed = 1
+ticks_per_second = 30
+population_cap = 150000
+
+[world]
+width = 512.0
+height = 512.0
+cell_size = 2.0
+spatial_cell_size = 16.0
+
+[terrain]
+seed = 1001
+water_level = 0.25
+rock_level = 0.88
+feature_scale = 96.0
+
+[food]
+max_per_cell = 1.0
+regrowth_per_tick = 0.001
+abundance = 1.0
+initial_fraction = 0.5
+intake_per_tick = 0.05
+energy_per_unit = 1.0
+
+[energy]
+capacity = 10.0
+base = 0.03
+size = 0.04
+move = 0.04
+sense = 0.003
+
+[mutation]
+probability = 0.1
+magnitude = 0.05
+
+[reproduction]
+threshold = 0.8
+offspring_energy_fraction = 0.3
+overhead = 0.5
+spawn_radius = 2.0
+
+[species.prey]
+start = { count = 2000 }
+start_energy_fraction = 0.5
+speed = { mean = 1.0, spread = 0.1 }
+size = { mean = 1.0, spread = 0.1 }
+sense = { mean = 10.0, spread = 1.0 }
+
+[species.predator]
+start = { count = 150 }
+start_energy_fraction = 0.6
+speed = { mean = 1.6, spread = 0.1 }
+size = { mean = 1.5, spread = 0.1 }
+sense = { mean = 14.0, spread = 1.0 }
+
+[predation]
+size_ratio = 1.2
+capture_radius = 1.0
+efficiency = 0.8
+content = 15.0
+
+[behavior]
+decision_interval = 10
+threat_interval = 2
+wander_speed_fraction = 0.5
+
+[navigation]
+expansions_per_request = 512
+budget_per_tick = 4000
+window_margin = 16.0
+drift_cells = 2.0
+hunt_replan_interval = 15
+stuck_window = 60
+stuck_min_progress = 1.0
+unreachable_ticks = 300
+
+[metrics]
+interval = 30
+
+[famine]
+at_tick = 36000
+food_multiplier = 0.4

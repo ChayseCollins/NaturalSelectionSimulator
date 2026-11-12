@@ -1,0 +1,53 @@
+{
+  "tool": "natural-selection-simulator headless bench",
+  "output_version": 1,
+  "run_seed": 1,
+  "reps": 1,
+  "warmup_ticks": 300,
+  "measured_ticks": 3000,
+  "build": "release",
+  "profile_feature": false,
+  "os": "linux",
+  "arch": "x86_64",
+  "logical_cpus": 8,
+  "tiers": [
+    {
+      "tier": "b-g",
+      "scenario": "Benchmark tier G (goal)",
+      "world_size": 2048,
+      "speed_multiplier": 1,
+      "modes": [
+        {
+          "mode": "frozen",
+          "median_tick_ms": 26.277203999999998,
+          "p95_tick_ms": 30.474319,
+          "p99_tick_ms": 34.023533,
+          "max_tick_ms": 52.041906999999995,
+          "ticks_per_second": 37.431089387831435,
+          "real_time_factor": 1.2477029795943813,
+          "organism_ticks_per_second": 1871554.4693915718,
+          "organisms_at_start": 50000,
+          "organisms_at_end": 50000,
+          "rtf_rule_met": false,
+          "p99_rule_met": true,
+          "phase_shares": {}
+        },
+        {
+          "mode": "ecological",
+          "median_tick_ms": 49.787297,
+          "p95_tick_ms": 58.663031999999994,
+          "p99_tick_ms": 67.79296599999999,
+          "max_tick_ms": 131.660517,
+          "ticks_per_second": 20.27402444233524,
+          "real_time_factor": 0.6758008147445079,
+          "organism_ticks_per_second": 1390906.4211308174,
+          "organisms_at_start": 60360,
+          "organisms_at_end": 56543,
+          "rtf_rule_met": false,
+          "p99_rule_met": true,
+          "phase_shares": {}
+        }
+      ]
+    }
+  ]
+}

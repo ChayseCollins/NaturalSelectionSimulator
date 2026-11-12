@@ -1,16 +1,23 @@
 //! Process-level tests of the `headless` binary: exit status, stderr, and real files
-//! (M-17, M-21, T-CSV-1 to T-CSV-4 and T-CSV-7 to T-CSV-9, T-DET-4's headless part).
-//! Files go under Cargo's per-target test directory, never a system path.
+//! (M-17, M-18, M-21: T-HL-1, T-HL-3, T-HL-4, T-CSV-1 to T-CSV-4 and T-CSV-7 to T-CSV-9,
+//! T-DET-4's headless part). Files go under Cargo's per-target test directory, never a
+//! system path.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use headless::format_state_hash;
-use sim::{ScenarioConfig, Simulation};
+use sim::Simulation;
 
 const HEADER: &str = "tick,sim_seconds,prey_population,avg_speed,avg_size,avg_sense,avg_energy,\
-                      total_food,cumulative_food_consumed,cumulative_starvation_deaths,state_hash";
+                      total_food,cumulative_food_consumed,cumulative_starvation_deaths,state_hash,\
+                      predator_population,avg_predator_speed,avg_predator_size,avg_predator_sense,\
+                      avg_predator_energy,cumulative_prey_births,cumulative_predator_births,\
+                      cumulative_predations,cumulative_predator_starvation_deaths,\
+                      prey_max_generation,predator_max_generation";
+
+const COLUMN_COUNT: usize = 22;
 
 fn headless(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_headless"))
@@ -108,7 +115,7 @@ fn t_csv_1_three_hundred_ticks_every_thirty() {
         ticks_column(&rows),
         (0..=10).map(|k| k * 30).collect::<Vec<u64>>()
     );
-    assert!(rows.iter().all(|row| row.len() == 11));
+    assert!(rows.iter().all(|row| row.len() == COLUMN_COUNT));
     assert!(text(&output.stdout).contains("11 rows written to"));
     let hash = &rows[10][10];
     assert!(hash.starts_with("0x") && hash.len() == 18, "{hash}");
@@ -211,10 +218,19 @@ fn usage_errors_exit_non_zero_with_help() {
     assert!(!no_args.status.success());
     assert!(text(&no_args.stderr).contains("Usage"));
 
-    assert_failure_mentions(&headless(&["experiment"]), "unrecognized subcommand");
+    assert_failure_mentions(&headless(&["simulate"]), "unrecognized subcommand");
+    assert_failure_mentions(&headless(&["experiment", "--ticks", "5"]), "--seeds");
     assert_failure_mentions(
-        &headless(&["run", "--seed", "1", "--ticks", "5", "--scenario", "x"]),
-        "--scenario",
+        &headless(&[
+            "run",
+            "--seed",
+            "1",
+            "--ticks",
+            "5",
+            "--scenario",
+            "no-such-file.toml",
+        ]),
+        "--scenario no-such-file.toml",
     );
     assert_failure_mentions(&headless(&["run", "--seed", "x", "--ticks", "5"]), "--seed");
     assert_failure_mentions(&headless(&["run", "--ticks", "5"]), "--seed");
@@ -234,8 +250,10 @@ fn help_lists_every_option() {
     assert_success(&output);
     let help = text(&output.stdout);
     for option in [
+        "--scenario",
         "--seed",
         "--ticks",
+        "--out",
         "--sample-every",
         "--csv",
         "--overwrite",
@@ -261,6 +279,10 @@ fn summary_reports_every_required_value() {
         "total food:",
         "cumulative food consumed:",
         "cumulative starvation deaths:",
+        "predator population:",
+        "cumulative prey births:",
+        "cumulative predations:",
+        "prey max generation:",
         "state hash:",
     ] {
         assert!(stdout.contains(label), "{label} missing:\n{stdout}");
@@ -269,15 +291,182 @@ fn summary_reports_every_required_value() {
 }
 
 /// T-DET-4, headless part: the binary's `run --ticks 1000` hash equals stepping the same
-/// scenario directly. The app-driver comparison is in `app/tests/t_det_4.rs`.
+/// scenario (the built-in baseline preset) directly. The app-driver comparison is in
+/// `app/src/t_det_4.rs`.
 #[test]
 fn t_det_4_binary_matches_direct_stepping() {
     let output = headless(&["run", "--seed", "1", "--ticks", "1000"]);
     assert_success(&output);
-    let mut direct = Simulation::new(&ScenarioConfig::default(), 1).expect("valid");
+    let config = headless::run::load_scenario(None).expect("baseline");
+    let mut direct = Simulation::new(&config, 1).expect("valid");
     direct.step_n(1_000);
     assert_eq!(
         printed_hash(&output),
         format_state_hash(direct.state_hash())
     );
+}
+
+fn preset_path() -> String {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../presets/baseline.scenario.toml")
+        .to_str()
+        .expect("UTF-8 path")
+        .to_string()
+}
+
+/// T-HL-1: `run` exits 0 and writes JSON with every required field (X4); the file and
+/// the built-in scenario give the same hash.
+#[test]
+fn t_hl_1_run_writes_json_with_every_required_field() {
+    let dir = test_dir("t_hl_1");
+    let path = dir.join("run.json");
+    let preset = preset_path();
+    let output = headless(&[
+        "run",
+        "--scenario",
+        &preset,
+        "--seed",
+        "2",
+        "--ticks",
+        "120",
+        "--out",
+        path.to_str().expect("UTF-8"),
+    ]);
+    assert_success(&output);
+    let json = fs::read_to_string(&path).expect("JSON written");
+    for key in [
+        "\"name\": \"Baseline predator-prey\"",
+        "\"format_version\": 1",
+        "\"run_seed\": 2",
+        "\"terrain_seed\": 1001",
+        "\"ticks\": 120",
+        "\"state_hash\": \"0x",
+        "\"prey\": {",
+        "\"predator\": {",
+        "\"cumulative_births\"",
+        "\"cumulative_deaths\"",
+        "\"successful_predations\"",
+        "\"elapsed_seconds\"",
+    ] {
+        assert!(json.contains(key), "{key} missing:\n{json}");
+    }
+    let built_in = headless(&["run", "--seed", "2", "--ticks", "120"]);
+    assert_eq!(printed_hash(&built_in), printed_hash(&output));
+}
+
+/// T-HL-3: an invalid scenario exits non-zero with a message naming the problem.
+#[test]
+fn t_hl_3_invalid_scenarios_fail_naming_the_problem() {
+    let dir = test_dir("t_hl_3");
+    let cases = [
+        (
+            "range.toml",
+            "format_version = 1\n[predation]\nsize_ratio = 99.0\n",
+            "predation.size_ratio",
+        ),
+        (
+            "unknown.toml",
+            "format_version = 1\n[food]\nsugar = 1.0\n",
+            "sugar",
+        ),
+        ("version.toml", "format_version = 7\n", "format_version"),
+        (
+            "syntax.toml",
+            "format_version = 1\n[world\n",
+            "invalid scenario",
+        ),
+    ];
+    for (name, text, needle) in cases {
+        let path = dir.join(name);
+        fs::write(&path, text).expect("write scenario");
+        let output = headless(&[
+            "run",
+            "--scenario",
+            path.to_str().expect("UTF-8"),
+            "--seed",
+            "1",
+            "--ticks",
+            "5",
+        ]);
+        assert_failure_mentions(&output, needle);
+        assert_failure_mentions(&output, name);
+    }
+}
+
+/// T-HL-4 (should): the same command twice gives identical JSON apart from timing.
+#[test]
+fn t_hl_4_json_is_identical_apart_from_timing() {
+    let dir = test_dir("t_hl_4");
+    let run = |name: &str| {
+        let path = dir.join(name);
+        assert_success(&headless(&[
+            "run",
+            "--seed",
+            "5",
+            "--ticks",
+            "90",
+            "--out",
+            path.to_str().expect("UTF-8"),
+        ]));
+        fs::read_to_string(&path)
+            .expect("JSON")
+            .lines()
+            .filter(|line| !line.contains("elapsed_seconds"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(run("a.json"), run("b.json"));
+}
+
+#[test]
+fn json_destination_is_protected_like_the_csv() {
+    let dir = test_dir("json_protect");
+    let path = dir.join("run.json");
+    fs::write(&path, "keep\n").expect("seed");
+    let output = headless(&[
+        "run",
+        "--seed",
+        "1",
+        "--ticks",
+        "3",
+        "--out",
+        path.to_str().expect("UTF-8"),
+    ]);
+    assert_failure_mentions(&output, "--overwrite");
+    assert_eq!(fs::read_to_string(&path).expect("read"), "keep\n");
+    assert_success(&headless(&[
+        "run",
+        "--seed",
+        "1",
+        "--ticks",
+        "3",
+        "--out",
+        path.to_str().expect("UTF-8"),
+        "--overwrite",
+    ]));
+}
+
+/// M-18: a tiny benchmark run exits 0 and writes its JSON report.
+#[test]
+fn bench_writes_a_report() {
+    let dir = test_dir("bench");
+    let path = dir.join("bench.json");
+    let output = headless(&[
+        "bench",
+        "--tiers",
+        "c",
+        "--reps",
+        "1",
+        "--warmup",
+        "1",
+        "--ticks",
+        "2",
+        "--out",
+        path.to_str().expect("UTF-8"),
+    ]);
+    assert_success(&output);
+    let json = fs::read_to_string(&path).expect("report");
+    assert!(json.contains("\"tier\": \"b-c\""), "{json}");
+    assert!(json.contains("\"mode\": \"frozen\""));
+    assert!(text(&output.stdout).contains("ecological"));
 }
