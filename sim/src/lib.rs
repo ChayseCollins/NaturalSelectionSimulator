@@ -6,8 +6,9 @@
 //!
 //! Implemented so far: the M-02 deterministic core, the M-03 prey foundation, the M-07
 //! food grid with regrowth and feeding, and the Week 1 part of M-09 (prey seek the
-//! richest food cell in sense range in an open world, otherwise wander). Empty phases are
-//! placeholders until their milestones land.
+//! richest useful food cell in sense range in an open world, reconsider that target at
+//! each decision, and otherwise wander). Empty phases are placeholders until their
+//! milestones land.
 
 #![forbid(unsafe_code)]
 
@@ -22,6 +23,7 @@ mod organisms;
 mod rng;
 pub mod traits;
 
+pub use behavior::{MIN_USEFUL_TARGET_BITES, TARGET_SWITCH_FRACTION};
 pub use config::{
     BehaviorConfig, EnergyConfig, FoodConfig, ScenarioConfig, SpeciesConfig, TraitStart,
     ValidationError, WorldConfig,
@@ -273,18 +275,24 @@ impl Simulation {
 
     /// Phase 2. Goal selection (Week 1 part of M-09). An organism decides on its first tick
     /// (age 0) and then every `decision_interval` ticks, staggered by ID (SCOPE 6.8). It
-    /// targets the richest food cell within sense range; with none, it clears its target
-    /// and draws a new wandering heading (exactly one behavior-domain draw). Threat checks
-    /// arrive with predators (M-05).
+    /// keeps its current food target while that target is still worthwhile, and otherwise
+    /// targets the richest useful food cell within sense range
+    /// ([`behavior::reconsider_target`]). With none, it clears its target and draws a new
+    /// wandering heading (exactly one behavior-domain draw); keeping or switching a target
+    /// draws nothing. Threat checks arrive with predators (M-05).
     fn sense_and_decide(&mut self) {
         let interval = u64::from(self.config.behavior.decision_interval);
+        let min_useful = behavior::min_useful_food(self.config.food.intake_per_tick);
         let o = &mut self.organisms;
         for i in 0..o.len() {
             let due = o.age[i] == 0 || self.tick.wrapping_add(o.id[i]).is_multiple_of(interval);
             if !due {
                 continue;
             }
-            match behavior::select_food_target(&self.food, o.x[i], o.y[i], o.sense[i]) {
+            let current = (o.target[i] != Organisms::NO_TARGET).then_some(o.target[i] as usize);
+            match behavior::reconsider_target(
+                &self.food, o.x[i], o.y[i], o.sense[i], current, min_useful,
+            ) {
                 Some(cell) => o.target[i] = cell as u32,
                 None => {
                     o.target[i] = Organisms::NO_TARGET;
@@ -1053,6 +1061,230 @@ mod tests {
         config.ticks_per_second = 1;
         let mut s = sim(&config, 4);
         step_checked(&mut s, 60);
+    }
+
+    // ----- Target reconsideration (Week 1 behavior correction) -----
+
+    /// Identical-trait prey (speed 1, size 1, sense 10) at 30 ticks per second with the
+    /// default energy coefficients, no starting food and no regrowth: food is placed by
+    /// hand.
+    fn hand_placed_food_config(start_count: u32) -> ScenarioConfig {
+        let mut config = uniform_config(start_count);
+        config.food.initial_fraction = 0.0;
+        config.food.regrowth_per_tick = 0.0;
+        config
+    }
+
+    fn position(s: &Simulation, index: usize) -> (f32, f32) {
+        (s.organisms.x[index], s.organisms.y[index])
+    }
+
+    /// A hungry prey eats a cell down below one bite, abandons it for the next useful cell
+    /// in range, and moves again, three times over; with no useful food left it wanders.
+    /// The amounts (0.3, 0.06, 0.06) are chosen so each switch is due to the one-bite rule
+    /// alone: a partly eaten first cell never falls below 75% of 0.06 while it still holds
+    /// a bite. Keeping and switching targets draw no random numbers; only the final switch
+    /// to wandering draws one behavior value (two 32-bit words).
+    #[test]
+    fn prey_leave_depleted_cells_and_resume_moving() {
+        let mut s = sim(&hand_placed_food_config(1), 1);
+        place(&mut s, 0, 100.0, 100.0);
+        // Cell centers (105, 101), (111, 101), (117, 101): each next one is in range only
+        // once the prey has reached the previous one.
+        let cells = [105.0, 111.0, 117.0].map(|x| s.food.cell_at(x, 100.0));
+        for (&cell, amount) in cells.iter().zip([0.3, 0.06, 0.06]) {
+            s.food.food[cell] = amount;
+        }
+        let rng_start = s.rng.word_positions();
+
+        let bite = s.config.food.intake_per_tick;
+        let mut visited = Vec::new();
+        let mut departures = 0;
+        let mut awaiting_departure = false;
+        let mut fed_in_place = 0;
+        for _ in 0..2_000 {
+            let (before, energy_before) = (position(&s, 0), s.organisms.energy[0]);
+            step_checked(&mut s, 1);
+            let target = s.organisms.target[0];
+            if target == Organisms::NO_TARGET {
+                break;
+            }
+            if let Some(&previous) = visited.last()
+                && previous != target
+            {
+                assert!(
+                    s.food.food[previous as usize] < bite,
+                    "left cell {previous} only once it held less than a bite"
+                );
+                awaiting_departure = true;
+            }
+            if visited.last() != Some(&target) {
+                visited.push(target);
+            }
+            let moved = position(&s, 0) != before;
+            fed_in_place += usize::from(!moved && s.organisms.energy[0] > energy_before);
+            if moved && awaiting_departure {
+                departures += 1;
+                awaiting_departure = false;
+            }
+        }
+        assert_eq!(visited, cells.map(|cell| cell as u32), "each cell in turn");
+        assert_eq!(departures, 2, "moved on from the first and second cells");
+        assert!(
+            fed_in_place >= 4,
+            "stationary feeding happened: {fed_in_place}"
+        );
+        assert_eq!(
+            s.organisms.target[0],
+            Organisms::NO_TARGET,
+            "wanders at the end"
+        );
+        for cell in cells {
+            assert!(s.food.food[cell] < bite, "cell {cell} depleted");
+        }
+        let [terrain, initial, behavior, mutation] = s.rng.word_positions();
+        assert_eq!(
+            [terrain, initial, mutation],
+            [rng_start[0], rng_start[1], rng_start[3]]
+        );
+        assert_eq!(
+            behavior,
+            rng_start[2] + 2,
+            "only the wandering decision drew"
+        );
+    }
+
+    /// One sated prey at the center of cell (50, 50) with every cell full (cap 1.0).
+    fn sated_prey_on_full_food(regrowth_per_tick: f32) -> Simulation {
+        let mut config = uniform_config(1);
+        config.food.regrowth_per_tick = regrowth_per_tick;
+        config.prey.start_energy_fraction = 1.0;
+        let mut s = sim(&config, 1);
+        place(&mut s, 0, 101.0, 101.0);
+        s
+    }
+
+    /// Food a stationary sated prey of this test's traits eats per tick: exactly its
+    /// standing energy cost.
+    fn standing_demand(s: &Simulation) -> f32 {
+        energy::cost_per_tick(&s.config.energy, s.organisms.traits(0), 0.0, 30)
+            / s.config.food.energy_per_unit
+    }
+
+    /// Diagnostic for the Week 1 defect (prey stop moving about 15 s after Play). A sated
+    /// prey eats only its standing cost. When its cell regrows more slowly than that, the
+    /// cell slowly depletes: the prey feeds in place for a while (valid), then its cell
+    /// falls below `TARGET_SWITCH_FRACTION` of a full neighbor, it retargets and moves on,
+    /// and this repeats. No random numbers are drawn: useful food is always in range.
+    #[test]
+    fn sated_prey_move_on_when_their_cell_regrows_slower_than_they_eat() {
+        let regrowth = 0.0005;
+        let mut s = sated_prey_on_full_food(regrowth);
+        assert!(regrowth < standing_demand(&s), "{}", standing_demand(&s));
+        let rng_start = s.rng.word_positions();
+        let cap = s.food.cap(0);
+        let first = s.food.cell_at(101.0, 101.0);
+
+        step_checked(&mut s, 30);
+        assert_eq!(s.organisms.target[0], first as u32, "feeds where it stands");
+        assert_eq!(position(&s, 0), (101.0, 101.0), "stationary while feeding");
+        assert!(s.food.food[first] < cap, "it ate");
+
+        let mut current = first as u32;
+        let mut switches = Vec::new();
+        let mut moving_ticks = 0;
+        for _ in 30..6_000 {
+            let before = position(&s, 0);
+            step_checked(&mut s, 1);
+            let target = s.organisms.target[0];
+            if target != current {
+                let left_behind = s.food.food[current as usize];
+                assert!(
+                    left_behind < TARGET_SWITCH_FRACTION * cap + regrowth,
+                    "switched away from {left_behind}, no longer worthwhile"
+                );
+                assert_eq!(s.food.food[target as usize], cap, "to a full cell");
+                switches.push(s.tick());
+                current = target;
+            }
+            if position(&s, 0) != before {
+                moving_ticks += 1;
+            }
+        }
+        assert!(switches.len() >= 3, "repeated retargeting: {switches:?}");
+        assert!(
+            switches[0] > 100,
+            "first fed in place for a while: {switches:?}"
+        );
+        assert!(moving_ticks > 0, "movement resumed");
+        assert_eq!(
+            s.rng.word_positions(),
+            rng_start,
+            "reconsideration drew nothing"
+        );
+    }
+
+    /// The boundary of the rule: when a cell regrows at least as fast as its sated
+    /// occupant eats (the shared default, 0.002 per tick), the cell stays at its cap and
+    /// remains worthwhile, so the prey feeds there indefinitely. This is valid stationary
+    /// feeding, not a stuck target; the app's demonstration scenario lowers regrowth.
+    #[test]
+    fn sated_prey_stay_where_regrowth_covers_their_demand() {
+        let mut s = sated_prey_on_full_food(0.002);
+        assert!(0.002 >= standing_demand(&s));
+        let first = s.food.cell_at(101.0, 101.0) as u32;
+        for _ in 0..6_000 {
+            step_checked(&mut s, 1);
+            assert_eq!(s.organisms.target[0], first);
+        }
+        assert_eq!(position(&s, 0), (101.0, 101.0));
+    }
+
+    /// Controlled multi-cell, multi-prey run in the slow-regrowth regime: in every
+    /// 20-second window prey move, feed, deplete cells below a bite and retarget, rather
+    /// than settling into permanent stationary feeding.
+    #[test]
+    fn grazing_population_keeps_moving_feeding_and_retargeting() {
+        let mut config = ScenarioConfig::default();
+        config.world.width = 64.0;
+        config.world.height = 64.0;
+        config.prey.start_count = 100;
+        config.food.initial_fraction = 0.25;
+        config.food.regrowth_per_tick = 0.0005;
+        let mut s = sim(&config, 1);
+        let bite = config.food.intake_per_tick;
+
+        for window in 0..6 {
+            let (mut moved, mut fed, mut retargeted, mut depleted) = (0, 0, 0, 0);
+            for _ in 0..600 {
+                let before = s.organisms.clone();
+                let food_before = s.food.food.clone();
+                s.step();
+                depleted += food_before
+                    .iter()
+                    .zip(&s.food.food)
+                    .filter(|&(&was, &now)| was >= bite && now < bite)
+                    .count();
+                if s.organisms.ids() != before.ids() {
+                    continue; // a death reordered storage this tick
+                }
+                for i in 0..s.organisms.len() {
+                    moved += usize::from(position(&s, i) != (before.x[i], before.y[i]));
+                    fed += usize::from(s.organisms.energy[i] > before.energy[i]);
+                    retargeted += usize::from(s.organisms.target[i] != before.target[i]);
+                }
+            }
+            s.check_invariants().expect("consistent");
+            // Prey-ticks of movement and feeding, target changes, and cells eaten below a
+            // bite in this window. Floors sit well under the observed values (at least
+            // 31,000, 1,000, 400 and 36) and far above a stationary population's (0).
+            let counts =
+                format!("moved {moved}, fed {fed}, retargeted {retargeted}, depleted {depleted}");
+            assert!(moved >= 10_000, "window {window}: {counts}");
+            assert!(fed >= 500, "window {window}: {counts}");
+            assert!(retargeted >= 100, "window {window}: {counts}");
+            assert!(depleted >= 10, "window {window}: {counts}");
+        }
     }
 
     /// T-EN-1 (controlled run): energy falls by exactly the formula's cost, charged once

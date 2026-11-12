@@ -13,7 +13,7 @@ M-01 (workspace foundation) is complete. M-02 (deterministic core) is complete f
 
 M-03 (prey organisms) is complete for prey only (T-EN-1, T-EN-3, T-CAP-1). The safety cap's birth suppression arrives with births (M-04); for now 150,000 is only the maximum starting count.
 
-M-07 (food grid, regrowth and feeding) is complete with uniform fertility. The Week 1 part of M-09 is complete: prey sense the richest food cell in range, move straight toward it in an open world, otherwise wander. Prey that find enough food survive; prey that do not still starve.
+M-07 (food grid, regrowth and feeding) is complete with uniform fertility. The Week 1 part of M-09 is complete: prey sense the richest useful food cell in range, move straight toward it in an open world, otherwise wander. At each decision they keep their current target only while it is still worthwhile (see [Food and seeking](#food-and-seeking-as-implemented-m-07-week-1-part-of-m-09-provisional)). Prey that find enough food survive; prey that do not still starve.
 
 **Current limitations:**
 
@@ -31,7 +31,10 @@ The M-17 Week 1 minimum (`headless run` with a printed summary) is complete. M-2
   - The average trait columns were constant across the run. This is expected: without reproduction or mutation, the population's traits do not change.
 - **T-HL-1 is deferred until M-16.** SCOPE's full M-17 includes scenario-aware JSON output (`--out`), which must name the scenario and its format version. Neither exists until scenario files arrive in M-16.
 
-No rendering or UI exists yet; the `app` binary is still a placeholder.
+The minimum Week 1 graphical application (M-10, M-11) is implemented. It shows prey and food, has Play, Pause and Reset, and supports pan and zoom; see [Desktop application](#desktop-application-m-10-m-11-week-1-minimum).
+
+- **WSL2:** the window opened and ran for 25 s without errors, using software rendering (`llvmpipe`). The visual and interactive checks are **pending**.
+- **Native Windows:** not tested yet.
 
 ### Prey model as implemented (M-03, provisional)
 
@@ -65,8 +68,11 @@ No rendering or UI exists yet; the `app` binary is still a placeholder.
   - The cell loses exactly that amount, and the prey gains `amount × energy_per_unit`, capped at capacity.
   - Prey sharing a cell eat in ascending storage index. This is a provisional order advantage for lower indices; feeding order is not randomized.
 - **Decisions (phase 2):** each prey decides on its first tick, then every `decision_interval` ticks (default 10), staggered by ID (SCOPE 6.8).
-  - It targets the cell with the most food whose center is within sense range, breaking ties by nearer center, then lower cell index. Only the cells in the sensing circle's bounding box are examined.
-  - With no food in range it clears its target and draws a new wandering heading: one behavior-domain draw per wandering decision.
+  - **Useful food:** a cell is a candidate only if its center is within sense range and it holds at least one useful bite, `MIN_USEFUL_TARGET_BITES` (1, P) × `intake_per_tick`. Only the cells in the sensing circle's bounding box are examined.
+  - **Best candidate:** the most food, breaking ties by nearer center, then lower cell index.
+  - **Target reconsideration:** the current target is kept while it holds at least one useful bite **and** at least `TARGET_SWITCH_FRACTION` (0.75, P) of the best candidate's food. Otherwise the prey switches to the best candidate. Smaller differences never cause a switch. Both constants are fixed provisional values in `sim/src/behavior.rs`, not scenario parameters.
+  - With no useful food in range it clears its target and draws a new wandering heading: one behavior-domain draw per wandering decision. Keeping or switching a target draws no random numbers.
+  - **Stationary feeding is valid.** A prey feeding in its target cell stays put until that cell stops being worthwhile. A sated prey eats only its standing energy cost (about 0.0013 food per tick for size 1 under the default coefficients). Where a cell regrows at least that fast, as under the shared default regrowth of 0.002, the cell stays at its cap and the prey can feed there indefinitely.
 - **Movement (phase 4):** a prey with a target stays put once inside the target cell. Otherwise it moves straight toward the cell center at full speed, without overshooting.
   - A wanderer moves `wander_speed_fraction` (default 0.5) of its maximum along its heading.
   - Positions are clamped to the world edges. A wanderer pressed against an edge stays there until its next decision.
@@ -133,6 +139,69 @@ Elapsed time is reported only. It is never part of the results or the CSV. Avera
 
 **T-CSV-10 manual check (passed, 2026-11-10):** the 18,000-tick example opened correctly in Microsoft Excel on the Windows reference machine; see Current status for what was verified. To repeat it, generate the example and open it in Excel (or LibreOffice Calc). Each column should be in its own column, decimals should read as numbers, and `state_hash` should show intact.
 
+## Desktop application (M-10, M-11 Week 1 minimum)
+
+```sh
+cargo run -p app            # WSL2 or Linux; see the WSLg note below
+cargo run -p app --release  # much smoother, especially with software rendering
+```
+
+**What it shows:**
+- One run of the **Week 1 demonstration scenario** (`app::session::app_scenario()`) with the fixed provisional run seed **1**. It is `ScenarioConfig::default()` with two app-only overrides (P):
+
+  | Field | Demo value | Shared default |
+  | --- | --- | --- |
+  | `food.initial_fraction` | 0.25 | 1.0 |
+  | `food.regrowth_per_tick` | 0.0005 | 0.002 |
+
+  `headless run` and `ScenarioConfig::default()` are unchanged. Under the shared default, regrowth exceeds a sated prey's standing demand, so nearly every prey sits still in a full cell from about 15 s on. Regrowth below that demand makes occupied cells slowly deplete, so prey move on. Lower starting food makes prey graze across several cells to fill up. Neither override targets an evolutionary outcome. Reset rebuilds exactly this scenario's tick-0 state and hash.
+- The app opens **paused at tick 0** in a 1280 × 720 window titled "Natural Selection Simulator". It needs no asset files.
+- **Food** is one texture with one pixel per grid cell. It blends linearly from dark soil (empty) to green (at cap), with nearest-neighbor sampling. It is updated in place after ticks run.
+- **Prey** are orange squares 3 world units wide (one sprite per living prey), drawn above the food.
+
+**Controls:**
+
+| Control | Effect |
+| --- | --- |
+| Play / Pause buttons | Run or stop the simulation at 1× through the existing `SteppingDriver`; a pause clears the backlog, so resuming never bursts |
+| Reset button | Rebuild the simulation from the same scenario and seed, back to tick 0 and the start hash; the backlog is cleared and the paused or running state is kept (M-02 semantics) |
+| Right- or middle-drag | Pan |
+| WASD or arrow keys | Pan (600 screen pixels per second) |
+| Mouse wheel | Zoom about the view center, from 0.01 to 16 world units per pixel |
+
+Pan and zoom work while paused and never touch the simulation. The view center is kept inside the world, so the map cannot be lost.
+
+**Panel readouts:** running or paused, seed, tick, simulated time, prey, starvation deaths, food consumed, state hash (`0x` + 16 hex digits), and achieved speed. The backlog appears when the driver falls behind, and the stall-capped frame count once it is nonzero.
+
+**How it works:**
+- `app::session::Session` owns the one authoritative `sim::Simulation` and the existing `SteppingDriver`.
+- Each frame passes Bevy's real frame time (`Time<Real>`) and an `Instant`-based work timer to the driver. `Time<Real>` is used instead of the default clock because the default already clamps frame time at 250 ms, which would hide stalls from the driver's own stall counter.
+- Visuals are refreshed only after ticks run, and rebuilt after a reset. Prey sprites are matched to organisms by stable ID, never by storage index, so swap-removal cannot attach a sprite to the wrong prey.
+- Nothing in `app` writes to the simulation.
+
+**WSLg note:** if `cargo run -p app` panics with `Failed to build event loop ... WaylandError(Connection(NoCompositor))`, the WSLg Wayland socket link is missing from `/run/user/1000`, which can happen after a WSL restart. Run with `XDG_RUNTIME_DIR=/mnt/wslg/runtime-dir cargo run -p app`. The X11 fallback needs the `libxkbcommon-x11` system package, which is not installed.
+
+**Manual Week 1 smoke test (pending):**
+
+1. The window opens with the right title, and the whole world is in view.
+2. Food is visible, and prey show clearly against it.
+3. Play: the tick advances and prey move. Cells that are eaten turn darker and regrow, and the hash changes. The food starts at a quarter of its cap, so the map starts dim green.
+4. Pause: the tick, prey and food all stop. Pan and zoom still work and leave the tick and hash unchanged. After a pause of several seconds, resuming shows no jump.
+5. Reset: the tick returns to 0, the start layout returns, and the hash equals the start hash.
+6. Zoom stops at both limits, and the view can't be lost off screen.
+7. Watch prey seek and eat for at least 2 simulated minutes. For about the first 30 s almost all prey travel and leave dark trails. After that many prey feed in place for several seconds at a time (valid), but a visible share keeps leaving cells and moving to new ones. **Fail** if nearly all prey stop for good, as they did before the target-reconsideration fix. Zoom in on a group to see the short hops.
+8. Note the frame rate at the default 2,000 prey.
+
+**Native Windows (pending):** build and run with `cargo run -p app --release` from a native Windows Rust install (the toolchain in `rust-toolchain.toml`), then repeat the checklist.
+
+**Known limitations (Week 1):**
+- **Movement is slow at the fitted zoom.** Prey move about 1 world unit per simulated second. At the fitted zoom that's about 1.3 pixels per second, so their movement is easiest to see zoomed in; eaten cells show more clearly.
+- **Calm grazing after the first half-minute.** Once prey are sated, most moves are hops into a neighboring cell, often less than a pixel at the fitted zoom. Without reproduction (M-04) the population cannot grow to use the food supply, so this is expected for Week 1.
+- **No starvation observed.** In the demo scenario no prey starved in the first 3 simulated minutes, and none starve within 10 minutes under the shared default (Week 3 balancing).
+- **Not in this task:** speed controls beyond 1× (M-11, Week 2), legend and fit-to-map button or Home key (M-10, Week 2), zoom toward the cursor (T-CAM-3), the performance overlay (M-18).
+- **Prey marker size.** It is fixed in world units, so markers shrink when you zoom out.
+- **Slow rendering in WSL2.** WSL2 rendering here is software only (`llvmpipe`).
+
 ## Workspace structure
 
 | Path | Kind | Role |
@@ -155,11 +224,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run -p headless -- run --seed 1 --ticks 300
 ```
 
-The suite has 153 tests:
+The suite has 182 tests:
 
-- 99 in `sim`: 97 unit and 2 integration.
+- 110 in `sim`: 108 unit (including 7 target-reconsideration unit tests and 4 controlled retargeting runs) and 2 integration.
 - 38 in `headless`: 26 unit and 12 process-level.
-- 16 in `app`: 15 driver tests plus T-DET-4.
+- 34 in `app`: 16 driver tests (including the Max-mode ceiling), T-DET-4, 9 session tests (including the demo scenario and its reset), 3 camera tests and 5 rendering tests.
 
 To run only the tests for one SCOPE area:
 
@@ -168,13 +237,18 @@ cargo test -p sim --test determinism   # T-DET-1, T-DET-2
 cargo test -p sim t_rng_1              # T-RNG-1
 cargo test -p sim t_en_                # T-EN-1, T-EN-3
 cargo test -p sim t_cap_1              # T-CAP-1
+cargo test -p sim behavior::           # seeking, target keep/switch rules and tie-breaking
+cargo test -p sim sated_prey           # diagnostic: sated prey feed, retarget and move on
 cargo test -p app driver               # T-FT-1 to T-FT-3
 cargo test -p app t_det_4              # T-DET-4 (driver, headless path, direct stepping)
+cargo test -p app session              # play, pause, reset, demo scenario and camera purity through the app session
+cargo test -p app camera               # camera fit, pan and zoom bounds
+cargo test -p app render               # food colors, texture rows, ID-to-sprite mapping
 cargo test -p headless t_csv_          # T-CSV-1 to T-CSV-9 (unit and process level)
 cargo test -p headless --test cli      # headless binary: exit codes, files, T-DET-4 binary check
 ```
 
-**Memory note (WSL2):** the `app` executables link all of Bevy with debug info, about 1 GB each, and linking one needs several GB of RAM. Two such links at once crashed the 7.7 GB WSL2 VM. For that reason T-DET-4 is a unit test inside the `app` library (`app/src/t_det_4.rs`), not an integration test, which would make Cargo link the `app` binary as well. If memory is tight, limit parallel jobs, for example `cargo test --workspace -j 2`.
+**Memory note (WSL2):** the `app` executables link all of Bevy with debug info, about 1 GB each, and linking one needs several GB of RAM. Two such links at once crashed the 7.7 GB WSL2 VM. For that reason T-DET-4 is a unit test inside the `app` library (`app/src/t_det_4.rs`), not an integration test, which would make Cargo link the `app` binary as well. For the same reason the `app` binary has `test = false`; it has no tests, and all testable app logic is in the library. If memory is tight, limit parallel jobs, for example `cargo test --workspace -j 2`.
 
 Dependency-boundary check (T-HL-6): neither command below should list any `bevy` or `egui` crate.
 
@@ -183,22 +257,15 @@ cargo tree -p sim
 cargo tree -p headless
 ```
 
-## Week 1 progress (Nov 10–16, 2026)
+## Milestone 1 progress (Nov 10–16, 2026)
 
 - [x] M-01 Cargo workspace, pinned versions, CLAUDE.md, README skeleton
 - [x] M-02 Deterministic fixed-step core and stepping driver (T-DET-4 complete)
 - [x] M-03 Prey organisms, traits, energy, starvation, age (safety-cap birth suppression waits for births in M-04)
 - [x] M-07, M-09 (basic) Food grid, feeding, simple food seeking (uniform fertility; open world)
-- [x] M-17 Week 1 minimum: `headless run` with printed summary. Scenario-aware JSON `--out` (T-HL-1) is deferred to M-16.
+- [x] M-17 Milestone 1 minimum: `headless run` with printed summary. Scenario-aware JSON `--out` (T-HL-1) is deferred to M-16.
 - [x] M-21 Minimal CSV export (T-CSV-1 to T-CSV-10 pass; T-CSV-10 checked manually in Excel)
-- [ ] M-10, M-11 Minimal Bevy view with play, pause, reset, pan, zoom
-
-## Reserve-hours ledger
-
-| Date | Hours used | Reason | Remaining |
-| --- | --- | --- | --- |
-| 2026-11-10 | 0 | Initial reserve | 19 |
-| 2026-11-10 | 2.5 (planned, not spent) | SCOPE v2.2: minimal CSV export promoted to must-have M-21; funded from Week 1 reserve (Week 1 is now 14 h + 1 h reserve) | 16.5 |
+- [X] M-10, M-11 Minimal Bevy view with play, pause, reset, pan, zoom. Implemented, and the WSL2 window opens; manual smoke test and native Windows run pending.
 
 ## Decisions
 
@@ -236,3 +303,9 @@ cargo tree -p headless
 | 2026-11-10 | `cumulative_food_consumed` (`f64`, food units actually removed from cells) added to `sim` state and the state hash; feeding behavior is unchanged. |
 | 2026-11-10 | T-DET-4 is an `app` library unit test rather than an integration test, to avoid a second ~1 GB Bevy link that exhausted WSL2 memory. |
 | 2026-11-10 | T-CSV-10 passed manually in Microsoft Excel on the Windows reference machine, so M-21 is complete. T-HL-1 (scenario-aware JSON output) is deferred until M-16, because scenario identity and format version do not exist yet. |
+| 2026-11-10 | Superseded (2026-11-11): the Week 1 app used the shared default scenario with no demonstration configuration. |
+| 2026-11-10 | Max-mode emergency ceiling: `DriverLimits::max_mode_tick_ceiling` = 100,000 ticks per frame (P). It stops an infinite loop if the work timer never advances; the 12 ms work budget remains the real limit. |
+| 2026-11-10 | Camera (P): zoom from 0.01 to 16 world units per pixel in ×1.1 wheel steps, about the view center; fit margin 1.05; keyboard pan 600 pixels per second; the view center is clamped to the world. |
+| 2026-11-10 | The app reads frame time from `Time<Real>`, not the default clock, so the driver's 250 ms stall cap and stall counter see real stalls. The `app` binary has `test = false` to avoid a second ~1 GB Bevy link during tests. |
+| 2026-11-11 | Target reconsideration (Week 1 behavior correction, M-09): a food target is kept only while it holds at least one useful bite (`MIN_USEFUL_TARGET_BITES` = 1 × `intake_per_tick`, P) and at least `TARGET_SWITCH_FRACTION` = 0.75 (P) of the best useful cell in range. Cells under one bite are no longer candidates. Ties still go to more food, then nearer center, then lower index; no random numbers are drawn. Root cause: prey sat still indefinitely in cells that regrew to the cap. This changes every run's trajectory and hash. |
+| 2026-11-11 | Week 1 app demonstration scenario (`app::session::app_scenario()`): `ScenarioConfig::default()` with `food.initial_fraction` = 0.25 and `food.regrowth_per_tick` = 0.0005 (P), run seed 1. The shared default and `headless run` are unchanged. Measured with the fix: regrowth alone still left nearly all prey still after about 15 s. Regrowth plus lower starting food kept prey travelling for about 30 s, and afterwards 6–13% made moves over 6 units in each 15 s. The proposed `abundance` = 0.75 added little, and `start_count` = 1,000 reduced movement, so neither is used. |

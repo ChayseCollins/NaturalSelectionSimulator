@@ -20,7 +20,8 @@
 //!   changes set owed time to zero. While paused no time accrues, so resuming never
 //!   causes a catch-up burst.
 //! - **Max mode:** no accumulator; each frame runs whole ticks while work done in the
-//!   frame is below `max_mode_work_per_frame`.
+//!   frame is below `max_mode_work_per_frame`, up to an emergency ceiling of
+//!   `max_mode_tick_ceiling` ticks that guards against a work timer that never advances.
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -72,6 +73,10 @@ pub struct DriverLimits {
     /// Real-time window over which achieved speed is averaged for the status bar (1 s, P).
     /// Not specified by SCOPE; the 60-second overlay statistics are M-18.
     pub achieved_speed_window: Duration,
+    /// Emergency ceiling on ticks per frame in Max mode (100,000, P). The work budget is
+    /// the real limit; this only stops an infinite loop if the work timer is wired wrongly
+    /// and never advances. It should never be reached in normal use.
+    pub max_mode_tick_ceiling: u64,
 }
 
 impl Default for DriverLimits {
@@ -82,6 +87,7 @@ impl Default for DriverLimits {
             max_mode_work_per_frame: Duration::from_millis(12),
             stall_cap: Duration::from_millis(250),
             achieved_speed_window: Duration::from_secs(1),
+            max_mode_tick_ceiling: 100_000,
         }
     }
 }
@@ -169,11 +175,13 @@ impl SteppingDriver {
             }
             None => {
                 self.owed = 0;
-                while work_elapsed() < self.limits.max_mode_work_per_frame {
+                while ticks_run < self.limits.max_mode_tick_ceiling
+                    && work_elapsed() < self.limits.max_mode_work_per_frame
+                {
                     sim.step();
                     ticks_run += 1;
                 }
-                false
+                ticks_run >= self.limits.max_mode_tick_ceiling
             }
         };
 
@@ -615,6 +623,26 @@ mod tests {
         assert_eq!(smooth_sim.tick(), 300);
         assert_eq!(capped_sim.state_hash(), direct.state_hash());
         assert_eq!(smooth_sim.state_hash(), direct.state_hash());
+    }
+
+    /// Max-mode emergency ceiling: a work timer that never advances stops at the ceiling
+    /// instead of looping forever, while an advancing timer stops on its budget first.
+    #[test]
+    fn max_mode_ceiling_stops_a_non_advancing_work_timer() {
+        let limits = DriverLimits {
+            max_mode_tick_ceiling: 250,
+            ..DriverLimits::default()
+        };
+        let mut sim = new_sim();
+        let mut driver = running(Speed::Max, limits);
+        let report = driver.frame(&mut sim, ms(16), no_work());
+        assert_eq!(report.ticks_run, 250, "stopped by the ceiling");
+        assert!(report.limited, "reported as limited");
+
+        let report = driver.frame(&mut sim, ms(16), work_per_tick(ms(1)));
+        assert_eq!(report.ticks_run, 12, "the work budget binds first");
+        assert!(!report.limited);
+        assert_eq!(DriverLimits::default().max_mode_tick_ceiling, 100_000);
     }
 
     #[test]

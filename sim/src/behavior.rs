@@ -1,8 +1,18 @@
 //! Basic goal-directed behavior in an unobstructed world (the Week 1 part of M-09).
 //!
-//! Prey pick the richest food cell within sense range and move straight toward it;
-//! with no food in range they wander on a stored heading. There are no barriers, routes,
-//! predators or spatial-grid regions yet (SCOPE 6.8's region scoring needs M-08).
+//! Prey pick the richest useful food cell within sense range and move straight toward
+//! it; with no useful food in range they wander on a stored heading. There are no
+//! barriers, routes, predators or spatial-grid regions yet (SCOPE 6.8's region scoring
+//! needs M-08).
+//!
+//! Target reconsideration: at every decision a prey keeps its current food target only
+//! while that target is still worthwhile, meaning it holds at least one useful bite
+//! ([`MIN_USEFUL_TARGET_BITES`] × intake per tick) and at least
+//! [`TARGET_SWITCH_FRACTION`] of the best useful cell in sense range. Otherwise it
+//! switches to that best cell, or wanders if there is none. Without this, a sated prey
+//! whose cell regrows at least as fast as it eats would keep that cell forever, because
+//! the cell stays at its cap and wins every tie on distance. Reconsideration reads food
+//! only and draws no random numbers.
 //!
 //! Movement energy uses realized effort: the distance actually moved this tick divided by
 //! the distance available (`max_distance_per_tick × terrain multiplier`), clamped to
@@ -14,12 +24,67 @@ use crate::food::FoodGrid;
 use crate::rng;
 use crate::traits::within_sense_range;
 
-/// Richest food cell whose center is within `sense` of `(x, y)`.
+/// Fewest bites of food that make a cell worth targeting (P). One bite is one tick's
+/// intake (`food.intake_per_tick`). A fixed provisional constant, not a scenario
+/// parameter; it moves into the configuration and `limits` if it becomes user-tunable.
+pub const MIN_USEFUL_TARGET_BITES: f32 = 1.0;
+
+/// A current target stays acceptable while it holds at least this fraction of the food in
+/// the best useful cell in sense range (P). Smaller differences never cause a switch. A
+/// fixed provisional constant, not a scenario parameter.
+pub const TARGET_SWITCH_FRACTION: f32 = 0.75;
+
+/// Least food a cell must hold to be a target: one useful bite.
+pub(crate) fn min_useful_food(intake_per_tick: f32) -> f32 {
+    MIN_USEFUL_TARGET_BITES * intake_per_tick
+}
+
+/// A cell is useful when it holds food and at least `min_useful`. Empty cells never count,
+/// even when intake is zero.
+fn is_useful(amount: f32, min_useful: f32) -> bool {
+    amount > 0.0 && amount >= min_useful
+}
+
+/// Food target after one decision: the current target while it is still worthwhile,
+/// otherwise the best useful cell in sense range ([`select_food_target`]), otherwise
+/// `None` (wander).
+///
+/// The current target is worthwhile when it is useful and holds at least
+/// [`TARGET_SWITCH_FRACTION`] of the best candidate's food. When the best candidate is the
+/// current target itself, the target is kept. Reads food only; no randomness.
+pub(crate) fn reconsider_target(
+    food: &FoodGrid,
+    x: f32,
+    y: f32,
+    sense: f32,
+    current: Option<usize>,
+    min_useful: f32,
+) -> Option<usize> {
+    let best = select_food_target(food, x, y, sense, min_useful);
+    if let Some(current) = current {
+        let amount = food.amounts()[current];
+        let keep = is_useful(amount, min_useful)
+            && best.is_none_or(|best| amount >= TARGET_SWITCH_FRACTION * food.amounts()[best]);
+        if keep {
+            return Some(current);
+        }
+    }
+    best
+}
+
+/// Richest useful food cell whose center is within `sense` of `(x, y)`.
 ///
 /// Ranking: more food first, then smaller squared distance to the cell center, then lower
-/// cell index. Only cells holding food count; `None` means nothing useful is in range.
-/// Only the cells inside the sensing circle's bounding box are examined.
-pub(crate) fn select_food_target(food: &FoodGrid, x: f32, y: f32, sense: f32) -> Option<usize> {
+/// cell index. Only cells holding food and at least `min_useful` count; `None` means
+/// nothing useful is in range. Only the cells inside the sensing circle's bounding box
+/// are examined.
+pub(crate) fn select_food_target(
+    food: &FoodGrid,
+    x: f32,
+    y: f32,
+    sense: f32,
+    min_useful: f32,
+) -> Option<usize> {
     let cell_size = food.cell_size();
     let bounds = |center: f32, cells: u32| {
         let first = ((center - sense) / cell_size).max(0.0) as u32;
@@ -34,7 +99,7 @@ pub(crate) fn select_food_target(food: &FoodGrid, x: f32, y: f32, sense: f32) ->
         for cx in x_first..=x_last {
             let index = food.index(cx, cy);
             let amount = food.amounts()[index];
-            if amount <= 0.0 {
+            if !is_useful(amount, min_useful) {
                 continue;
             }
             let (center_x, center_y) = food.cell_center(index);
@@ -148,24 +213,24 @@ mod tests {
         // Cell (5, 0) has its center at (11, 1); the prey stands at (1, 1).
         let grid = with_food(&[((5, 0), 0.5)]);
         assert_eq!(
-            select_food_target(&grid, 1.0, 1.0, 10.0),
+            select_food_target(&grid, 1.0, 1.0, 10.0, 0.0),
             Some(grid.index(5, 0))
         );
-        assert_eq!(select_food_target(&grid, 1.0, 1.0, 9.99), None);
+        assert_eq!(select_food_target(&grid, 1.0, 1.0, 9.99, 0.0), None);
     }
 
     #[test]
     fn richest_cell_wins_then_nearest_then_lowest_index() {
         let grid = with_food(&[((2, 0), 0.5), ((4, 0), 0.75)]);
         assert_eq!(
-            select_food_target(&grid, 1.0, 1.0, 20.0),
+            select_food_target(&grid, 1.0, 1.0, 20.0, 0.0),
             Some(grid.index(4, 0)),
             "more food beats distance"
         );
 
         let grid = with_food(&[((2, 0), 0.5), ((4, 0), 0.5)]);
         assert_eq!(
-            select_food_target(&grid, 1.0, 1.0, 20.0),
+            select_food_target(&grid, 1.0, 1.0, 20.0, 0.0),
             Some(grid.index(2, 0)),
             "equal food: nearer wins"
         );
@@ -174,7 +239,7 @@ mod tests {
         // cell (1, 0), which hold equal food.
         let grid = with_food(&[((0, 1), 0.5), ((1, 0), 0.5)]);
         assert_eq!(
-            select_food_target(&grid, 2.0, 2.0, 5.0),
+            select_food_target(&grid, 2.0, 2.0, 5.0, 0.0),
             Some(grid.index(1, 0)),
             "full tie: lower index (1, 0) = 1 beats (0, 1) = 10"
         );
@@ -185,18 +250,21 @@ mod tests {
         let grid = with_food(&[((9, 9), 0.01)]);
         // Many empty cells are nearer, but only the non-empty one counts.
         assert_eq!(
-            select_food_target(&grid, 10.0, 10.0, 15.0),
+            select_food_target(&grid, 10.0, 10.0, 15.0, 0.0),
             Some(grid.index(9, 9))
         );
-        assert_eq!(select_food_target(&empty_grid(), 10.0, 10.0, 50.0), None);
+        assert_eq!(
+            select_food_target(&empty_grid(), 10.0, 10.0, 50.0, 0.0),
+            None
+        );
     }
 
     #[test]
     fn search_is_clipped_at_world_edges() {
         let grid = with_food(&[((0, 0), 0.5), ((9, 9), 0.5)]);
-        assert_eq!(select_food_target(&grid, 0.0, 0.0, 3.0), Some(0));
+        assert_eq!(select_food_target(&grid, 0.0, 0.0, 3.0, 0.0), Some(0));
         assert_eq!(
-            select_food_target(&grid, 20.0, 20.0, 3.0),
+            select_food_target(&grid, 20.0, 20.0, 3.0, 0.0),
             Some(grid.cell_count() - 1)
         );
     }
@@ -255,5 +323,111 @@ mod tests {
             2_000,
             "one 64-bit draw per heading"
         );
+    }
+
+    // ----- Target reconsideration -----
+
+    /// One bite at the default intake.
+    const BITE: f32 = 0.05;
+
+    /// Prey standing at the center (5, 5) of cell (2, 2), sense 10.
+    fn reconsider(grid: &FoodGrid, current: Option<usize>) -> Option<usize> {
+        reconsider_target(grid, 5.0, 5.0, 10.0, current, BITE)
+    }
+
+    #[test]
+    fn useful_food_needs_at_least_one_bite() {
+        assert_eq!(min_useful_food(0.05), 0.05 * MIN_USEFUL_TARGET_BITES);
+        let grid = with_food(&[((3, 2), 0.049), ((6, 2), 0.05)]);
+        assert_eq!(
+            select_food_target(&grid, 5.0, 5.0, 10.0, BITE),
+            Some(grid.index(6, 2)),
+            "less than a bite is ignored even when nearer"
+        );
+        let grid = with_food(&[((3, 2), 0.049)]);
+        assert_eq!(select_food_target(&grid, 5.0, 5.0, 10.0, BITE), None);
+        assert!(
+            !is_useful(0.0, 0.0),
+            "empty never counts, even at zero intake"
+        );
+    }
+
+    #[test]
+    fn worthwhile_current_target_is_kept() {
+        // Current (2, 2) holds 0.8; the best other cell holds 1.0 (0.8 ≥ 0.75 × 1.0).
+        let grid = with_food(&[((2, 2), 0.8), ((4, 2), 1.0)]);
+        let current = grid.index(2, 2);
+        assert_eq!(reconsider(&grid, Some(current)), Some(current));
+        // It is also kept when it is itself the best candidate.
+        let grid = with_food(&[((2, 2), 1.0), ((4, 2), 1.0)]);
+        assert_eq!(reconsider(&grid, Some(current)), Some(current));
+        // Exactly at the switch fraction still counts as worthwhile.
+        let grid = with_food(&[((2, 2), 0.75), ((4, 2), 1.0)]);
+        assert_eq!(reconsider(&grid, Some(current)), Some(current));
+    }
+
+    #[test]
+    fn current_target_below_one_bite_is_abandoned_for_a_useful_one() {
+        let grid = with_food(&[((2, 2), 0.04), ((4, 2), 0.06)]);
+        assert_eq!(
+            reconsider(&grid, Some(grid.index(2, 2))),
+            Some(grid.index(4, 2))
+        );
+        // With no useful alternative the target is dropped: the prey wanders.
+        let grid = with_food(&[((2, 2), 0.04), ((4, 2), 0.03)]);
+        assert_eq!(reconsider(&grid, Some(grid.index(2, 2))), None);
+        // Even a below-a-bite target is dropped when it is all there is.
+        let grid = with_food(&[((2, 2), 0.04)]);
+        assert_eq!(reconsider(&grid, Some(grid.index(2, 2))), None);
+    }
+
+    #[test]
+    fn materially_richer_cell_replaces_the_current_target() {
+        // 0.74 < 0.75 × 1.0: switch.
+        let grid = with_food(&[((2, 2), 0.74), ((4, 2), 1.0)]);
+        assert_eq!(
+            reconsider(&grid, Some(grid.index(2, 2))),
+            Some(grid.index(4, 2))
+        );
+    }
+
+    #[test]
+    fn small_differences_never_cause_a_switch() {
+        let current_index = |grid: &FoodGrid| grid.index(2, 2);
+        for current in [0.76, 0.9, 0.99, 0.999_9] {
+            let grid = with_food(&[((2, 2), current), ((3, 2), 1.0), ((4, 4), 1.0)]);
+            assert_eq!(
+                reconsider(&grid, Some(current_index(&grid))),
+                Some(current_index(&grid)),
+                "current {current} vs best 1.0"
+            );
+        }
+    }
+
+    #[test]
+    fn switching_uses_the_deterministic_ranking() {
+        let current = |grid: &FoodGrid| Some(grid.index(2, 2));
+        // More food wins over distance.
+        let grid = with_food(&[((2, 2), 0.01), ((3, 2), 0.5), ((5, 2), 0.6)]);
+        assert_eq!(reconsider(&grid, current(&grid)), Some(grid.index(5, 2)));
+        // Equal food: the nearer center wins.
+        let grid = with_food(&[((2, 2), 0.01), ((3, 2), 0.5), ((5, 2), 0.5)]);
+        assert_eq!(reconsider(&grid, current(&grid)), Some(grid.index(3, 2)));
+        // Equal food and distance: the lower index wins. (3, 2) = 23 beats (2, 3) = 32,
+        // both one cell from (2, 2).
+        let grid = with_food(&[((2, 2), 0.01), ((2, 3), 0.5), ((3, 2), 0.5)]);
+        assert_eq!(reconsider(&grid, current(&grid)), Some(grid.index(3, 2)));
+        // Same input, same answer.
+        assert_eq!(
+            reconsider(&grid, current(&grid)),
+            reconsider(&grid.clone(), current(&grid))
+        );
+    }
+
+    #[test]
+    fn without_a_current_target_the_best_useful_cell_is_chosen() {
+        let grid = with_food(&[((3, 2), 0.04), ((4, 2), 0.3)]);
+        assert_eq!(reconsider(&grid, None), Some(grid.index(4, 2)));
+        assert_eq!(reconsider(&empty_grid(), None), None);
     }
 }

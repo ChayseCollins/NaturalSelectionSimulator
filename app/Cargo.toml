@@ -8,6 +8,14 @@ publish.workspace = true
 
 # egui is listed directly so the pinned version in [workspace.dependencies] is enforced;
 # bevy_egui and egui_plot must resolve to this same single egui version.
+# The Bevy binary has no tests of its own; skipping its test harness avoids a second
+# ~1 GB Bevy link during `cargo test`, which exhausted WSL2 memory. All testable app
+# logic is in the library.
+[[bin]]
+name = "app"
+path = "src/main.rs"
+test = false
+
 [dependencies]
 sim.workspace = true
 bevy.workspace = true
